@@ -1,0 +1,16 @@
+{
+	"dependencies": {
+		"@warptoad/fat-imt.sol": "0.0.5",
+		"@warptoad/skinny-imt.sol": "0.0.5"
+	},
+	"type": "module",
+	"devDependencies": {
+		"@nomicfoundation/hardhat-ignition": "3.1.8",
+		"@nomicfoundation/hardhat-toolbox-viem": "5.0.7",
+		"@types/node": "22.8.5",
+		"forge-std": "github:foundry-rs/forge-std#v1.9.4",
+		"hardhat": "3.11.1",
+		"typescript": "~6.0.3",
+		"viem": "2.47.6"
+	}
+}

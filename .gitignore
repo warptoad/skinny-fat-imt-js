@@ -141,3 +141,11 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+cache/compile-cache.json
+artifacts/artifacts.d.ts
+artifacts/build-info/solc-0_8_28-442e3ce003343bc9701ef81107cdcf88ffffa670.json
+artifacts/build-info/solc-0_8_28-442e3ce003343bc9701ef81107cdcf88ffffa670.output.json
+artifacts/contracts/SkinnyFatArchiveNode.sol/artifacts.d.ts
+artifacts/contracts/SkinnyFatArchiveNode.sol/SkinnyFatArchiveNode.json
+artifacts/contracts/SkinnyFatFullNode.sol/artifacts.d.ts
+artifacts/contracts/SkinnyFatFullNode.sol/SkinnyFatFullNode.json
