@@ -15,7 +15,9 @@ import {SkinnyIMTReadableStorage} from "@warptoad/skinny-imt.sol/SkinnyIMTReadab
 
 import {SkinnyIMTPoseidon2WriteEvent, SkinnyIMTDataEvent} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteEvent.sol";
 import {SkinnyIMTDataEvent} from "@warptoad/skinny-imt.sol/InternalSkinnyIMTEvent.sol";
-import {SkinnyIMTReadableEvent} from "@warptoad/skinny-imt.sol/SkinnyIMTReadableEvent.sol";
+
+import {FatIMTPoseidon2Read} from "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2Read.sol";
+import {SkinnyIMTPoseidon2Read} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2Read.sol";
 
 error WrongTreeId();
 // TODO nice to have also in the package, but zk-kit structure clashes, so maybe skinny-fat as one package?
@@ -26,7 +28,7 @@ enum TreeType {
     FAT_EVENT
 }
 
-contract SkinnyFatFullNode is SkinnyIMTReadableStorage, FatIMTReadableStorage {
+contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage {
     //mapping(uint256 => FatIMTDataStorage) fatStorageTrees;
     FatIMTDataStorage[] fatStorageTrees;
     FatIMTDataEvent[] fatEventTrees;
@@ -215,5 +217,20 @@ contract SkinnyFatFullNode is SkinnyIMTReadableStorage, FatIMTReadableStorage {
             leafIndexes,
             proofSiblings
         );
+    }
+
+    function _assertRootMatch() private view returns(uint256) {
+        uint256 fatStorageRoot = FatIMTPoseidon2Read.root(fatStorageTrees[0].treeData);
+        uint256 fatEventRoot = FatIMTPoseidon2Read.root(fatEventTrees[0]);
+        uint256 skinnyStorageRoot = SkinnyIMTPoseidon2Read.root(skinnyStorageTrees[0].treeData);
+        uint256 skinnyEventRoot = SkinnyIMTPoseidon2Read.root(skinnyEventTrees[0]);
+        require( fatStorageRoot == fatEventRoot, "fatStorageRoot does not match fatEventRoot");
+        require( fatStorageRoot == skinnyStorageRoot, "fatStorageRoot does not match skinnyStorageRoot");
+        require( fatStorageRoot == skinnyEventRoot, "fatStorageRoot does not match skinnyEventRoot");
+        return fatStorageRoot;
+    }
+
+    function root() public view returns(uint256) {
+        return _assertRootMatch(); 
     }
 }

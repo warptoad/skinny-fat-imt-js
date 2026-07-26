@@ -4,6 +4,17 @@ import { configVariable, defineConfig } from "hardhat/config";
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
   solidity: {
+    // These libraries live in node_modules; Hardhat 3 only emits deployable
+    // artifacts for local sources, so list them here to get artifacts we can
+    // deploy + link against SkinnyFat.
+    npmFilesToBuild: [
+      "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2Read.sol",
+      "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2Read.sol",
+      "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2WriteStorage.sol",
+      "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2WriteEvent.sol",
+      "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteStorage.sol",
+      "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteEvent.sol",
+    ],
     profiles: {
       default: {
         version: "0.8.28",
