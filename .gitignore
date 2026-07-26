@@ -149,3 +149,4 @@ artifacts/contracts/SkinnyFatArchiveNode.sol/artifacts.d.ts
 artifacts/contracts/SkinnyFatArchiveNode.sol/SkinnyFatArchiveNode.json
 artifacts/contracts/SkinnyFatFullNode.sol/artifacts.d.ts
 artifacts/contracts/SkinnyFatFullNode.sol/SkinnyFatFullNode.json
+contracts/SkinnyFatArchiveNode.sol

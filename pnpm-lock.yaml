@@ -8,12 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@nomicfoundation/hardhat-ignition-viem':
+        specifier: ^3.1.6
+        version: 3.1.6(@nomicfoundation/hardhat-ignition@3.1.8(@nomicfoundation/hardhat-verify@3.0.21(hardhat@3.11.1))(hardhat@3.11.1))(@nomicfoundation/hardhat-verify@3.0.21(hardhat@3.11.1))(@nomicfoundation/hardhat-viem@3.0.9(hardhat@3.11.1)(viem@2.47.6(typescript@6.0.3)(zod@3.25.76)))(@nomicfoundation/ignition-core@3.1.8)(hardhat@3.11.1)(viem@2.47.6(typescript@6.0.3)(zod@3.25.76))
       '@warptoad/fat-imt.sol':
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
       '@warptoad/skinny-imt.sol':
-        specifier: 0.0.5
-        version: 0.0.5
+        specifier: 0.0.7
+        version: 0.0.7
     devDependencies:
       '@nomicfoundation/hardhat-ignition':
         specifier: 3.1.8
@@ -505,11 +508,11 @@ packages:
   '@types/node@22.8.5':
     resolution: {integrity: sha512-5iYk6AMPtsMbkZqCO1UGF9W5L38twq11S2pYWkybGHH2ogPUvXWNlQqJBzuEZWKj/WRH+QTeiv6ySWqJtvIEgA==}
 
-  '@warptoad/fat-imt.sol@0.0.5':
-    resolution: {integrity: sha512-WhQC8C3LCA69JY9ogNoFkqeEsSLEug8Q2qiyZj5iCsYgiokm11sIjO6/K97FVSLT/0r1/5tT95pdfiiDRDp0pw==}
+  '@warptoad/fat-imt.sol@0.0.7':
+    resolution: {integrity: sha512-UqeW9gDa5D0Mqz5CQhYsM0WKL7vC614QEPIEPg8JoyGPJ2xC8FwFORmbNiGWdeRyvcCzVUrozDnPa9mA60EO4A==}
 
-  '@warptoad/skinny-imt.sol@0.0.5':
-    resolution: {integrity: sha512-HTs1szAIZk/o1PJfIlQz2T0FLhYplEpgRCglaB3Q/H+yKFWl0HSGKuJQbnjf5kU6m7qBPB95G0r739KuTth2Cw==}
+  '@warptoad/skinny-imt.sol@0.0.7':
+    resolution: {integrity: sha512-Kexkq6KitPSAufdwN5VG0x5gdvTiDbcOFk1CPDD08ka1H/AJfKwK5UTyzwfQfcBUSa2mUK/Aaku0VNeb31nhYw==}
 
   abitype@1.2.3:
     resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
@@ -1338,12 +1341,12 @@ snapshots:
     dependencies:
       undici-types: 6.19.8
 
-  '@warptoad/fat-imt.sol@0.0.5':
+  '@warptoad/fat-imt.sol@0.0.7':
     dependencies:
       poseidon-solidity: 0.0.5
       poseidon2-evm: 2.0.0
 
-  '@warptoad/skinny-imt.sol@0.0.5':
+  '@warptoad/skinny-imt.sol@0.0.7':
     dependencies:
       poseidon-solidity: 0.0.5
       poseidon2-evm: 2.0.0
