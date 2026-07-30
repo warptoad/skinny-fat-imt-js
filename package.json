@@ -1,8 +1,9 @@
 {
 	"dependencies": {
 		"@nomicfoundation/hardhat-ignition-viem": "^3.1.6",
-		"@warptoad/fat-imt.sol": "0.0.7",
-		"@warptoad/skinny-imt.sol": "0.0.7",
+		"@warptoad/fat-imt.sol": "0.0.8",
+		"@warptoad/skinny-imt.sol": "0.0.8",
+		"@warptoad/gigabridge-js": "^0.0.10",
 		"@zk-kit/lean-imt": "^2.2.5",
 		"@zkpassport/poseidon2": "^0.6.2"
 	},

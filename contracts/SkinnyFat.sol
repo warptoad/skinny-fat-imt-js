@@ -71,6 +71,16 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage {
         indexOfTreeId[skinnyEventTrees.length - 1] = skinnyEventTreeId;
     }
 
+    // 
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view override(FatIMTReadableStorage, SkinnyIMTReadableStorage) returns (bool) {
+        // this calls FatIMTReadableStorage.supportsInterface(), which contains a super in it as well which then will
+        // call the skinny variant since it is also inherited
+        return super.supportsInterface(interfaceId);
+    }
+
+
     // overridable functions so SkinnyIMTFullNodeReadable and SkinnyIMTDataFullNode
     // can find out where the tree is stored so it can expose a interface to get the leaves and storage slot for debug_getStorageRangeAt
     function _getFatStorageTree(

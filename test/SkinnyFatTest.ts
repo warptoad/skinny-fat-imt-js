@@ -207,28 +207,28 @@ async function randomTree(
   seed: Hex,
   walletClient: WalletWithAccount,
   publicClient: PublicClient,
-  numTxs = 10
-) {
-  const ops = [
+  minOps=0,
+  ops = [
     randomInsert,
     randomInsertMany,
     randomInsertRepeated,
     randomUpdate,
     randomUpdateMany,
-  ]
-
-  // Coverage floor: every op runs at least twice, regardless of numTxs. Then `numTxs` extra
-  // randomly-chosen ops are added on top. The schedule is a flat list of op indexes.
+  ],
+  numTxs = 10
+) {
+  // add minimum amount of operations per functions
   const schedule: number[] = []
   for (let i = 0; i < ops.length; i++) {
-    schedule.push(i, i)
+    schedule.push(...new Array(minOps).fill(i))
   }
+
+  // add random operations
   for (let i = 0; i < numTxs; i++) {
     schedule.push(Number(BigInt(sha256(concat([seed, toHex(`extraOp${i}`)]))) % BigInt(ops.length)))
   }
 
-  // Shuffle into a deterministic, seed-derived random order (Fisher-Yates) so the ordering varies per
-  // seed but stays reproducible. This also handles numTxs === 0: the mandatory ops still run, shuffled.
+  // Shuffle
   for (let i = schedule.length - 1; i > 0; i--) {
     const j = Number(BigInt(sha256(concat([seed, toHex(`shuffle${i}`)]))) % BigInt(i + 1))
     const tmp = schedule[i]
@@ -236,6 +236,7 @@ async function randomTree(
     schedule[j] = tmp
   }
 
+  // run
   for (let index = 0; index < schedule.length; index++) {
     const iterSeed = sha256(concat([seed, toHex(`iter${index}`)]))
     jsTree = await ops[schedule[index]](SkinnyFatContract, jsTree, iterSeed, walletClient, publicClient)
