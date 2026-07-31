@@ -19,6 +19,8 @@ import {SkinnyIMTDataEvent} from "@warptoad/skinny-imt.sol/InternalSkinnyIMTEven
 import {FatIMTPoseidon2Read} from "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2Read.sol";
 import {SkinnyIMTPoseidon2Read} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2Read.sol";
 
+import {IIMTEvents} from "@warptoad/fat-imt.sol/interfaces/IIMTEvents.sol";
+
 error WrongTreeId();
 // TODO nice to have also in the package, but zk-kit structure clashes, so maybe skinny-fat as one package?
 enum TreeType {
@@ -28,7 +30,7 @@ enum TreeType {
     FAT_EVENT
 }
 
-contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage {
+contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvents {
     //mapping(uint256 => FatIMTDataStorage) fatStorageTrees;
     FatIMTDataStorage[] fatStorageTrees;
     FatIMTDataEvent[] fatEventTrees;

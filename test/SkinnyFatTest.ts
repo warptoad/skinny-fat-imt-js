@@ -6,6 +6,7 @@ import { poseidon2Hash } from "@zkpassport/poseidon2"
 import { network } from "hardhat";
 import type { SkinnyFat$Type } from "../artifacts/contracts/SkinnyFat.sol/artifacts.js";
 import { concat, sha256, toHex, type Account, type GetContractReturnType, type Hex, type PublicClient, type WalletClient } from "viem"
+import { Trees } from "../src/Trees.js";
 
 export type WalletWithAccount = WalletClient & { account: Account };
 export type SkinnyFatContractType = GetContractReturnType<SkinnyFat$Type["abi"], WalletClient>;
@@ -105,6 +106,9 @@ describe("SkinnyFat", async function () {
     let jsTree = new LeanIMT((a, b) => poseidon2Hash([a, b]))
     jsTree = await randomTree(SkinnyFatContract, jsTree, seed, deployer, publicClient)
     assert.equal(jsTree.root, await SkinnyFatContract.read.root())
+
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    await trees.syncTreesEvent()
   });
 });
 
@@ -207,7 +211,7 @@ async function randomTree(
   seed: Hex,
   walletClient: WalletWithAccount,
   publicClient: PublicClient,
-  minOps=0,
+  minOps = 0,
   ops = [
     randomInsert,
     randomInsertMany,

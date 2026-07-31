@@ -22,6 +22,9 @@ export default defineConfig({
       "@warptoad/fat-imt.sol/interfaces/IFatIMTReadableStorage.sol",
       "@warptoad/fat-imt.sol/interfaces/IFatIMTReadableEvent.sol",
 
+      // TODO rename to IEvent
+      "@warptoad/fat-imt.sol/interfaces/IIMTEvents.sol",
+
       "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteStorage.sol",
       "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteEvent.sol",
       "@warptoad/fat-imt.sol/poseidon2/FatIMTPoseidon2WriteStorage.sol",
