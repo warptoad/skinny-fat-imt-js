@@ -101,7 +101,7 @@ describe("SkinnyFat", async function () {
     });
   })
 
-  const seed = "0x2b8c46ded709edab5791195a22ccec73bc2f7a2e81bb52b6286f1666958836da"//toHex(crypto.getRandomValues(new Uint8Array(32)))
+  const seed = "0x61cd64bd14c927ff4f8658bc16d2ca9d5e0d5797f1c912f8279c884918575037" ///toHex(crypto.getRandomValues(new Uint8Array(32)))
   it(`Should all operations at least twice with random seed: ${seed}`, async function () {
     let jsTree = new LeanIMT((a, b) => poseidon2Hash([a, b]))
     jsTree = await randomTree(SkinnyFatContract, jsTree, seed, deployer, publicClient)
@@ -110,6 +110,7 @@ describe("SkinnyFat", async function () {
     const trees = new Trees(SkinnyFatContract.address, publicClient)
     const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
     await trees.syncTreesEvent([...treeIds])
+    await trees.syncTreesEvent()
   });
 });
 
