@@ -30,7 +30,11 @@ enum TreeType {
     FAT_EVENT
 }
 
-contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvents {
+contract SkinnyFat is
+    SkinnyIMTReadableStorage,
+    FatIMTReadableStorage,
+    IIMTEvents
+{
     //mapping(uint256 => FatIMTDataStorage) fatStorageTrees;
     FatIMTDataStorage[] fatStorageTrees;
     FatIMTDataEvent[] fatEventTrees;
@@ -52,13 +56,12 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvent
         indexOfTreeId[fatStorageTrees.length - 1] = fatStorageTreeId;
 
         FatIMTDataEvent storage fatEventTree = fatEventTrees.push();
-        uint256 fatEventTreeId = FatIMTPoseidon2WriteEvent.init(
-            fatEventTree
-        );
+        uint256 fatEventTreeId = FatIMTPoseidon2WriteEvent.init(fatEventTree);
         treeTypes[fatEventTreeId] = TreeType.FAT_EVENT;
         indexOfTreeId[fatEventTrees.length - 1] = fatEventTreeId;
 
-        SkinnyIMTDataStorage storage skinnyStorageTree = skinnyStorageTrees.push();
+        SkinnyIMTDataStorage storage skinnyStorageTree = skinnyStorageTrees
+            .push();
         uint256 skinnyStorageTreeId = SkinnyIMTPoseidon2WriteStorage.init(
             skinnyStorageTree
         );
@@ -73,15 +76,19 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvent
         indexOfTreeId[skinnyEventTrees.length - 1] = skinnyEventTreeId;
     }
 
-    // 
+    //
     function supportsInterface(
         bytes4 interfaceId
-    ) public view override(FatIMTReadableStorage, SkinnyIMTReadableStorage) returns (bool) {
+    )
+        public
+        view
+        override(FatIMTReadableStorage, SkinnyIMTReadableStorage)
+        returns (bool)
+    {
         // this calls FatIMTReadableStorage.supportsInterface(), which contains a super in it as well which then will
         // call the skinny variant since it is also inherited
         return super.supportsInterface(interfaceId);
     }
-
 
     // overridable functions so SkinnyIMTFullNodeReadable and SkinnyIMTDataFullNode
     // can find out where the tree is stored so it can expose a interface to get the leaves and storage slot for debug_getStorageRangeAt
@@ -126,6 +133,17 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvent
         }
     }
 
+    function getTreeIds(
+        uint256 index
+    ) public view returns (uint256, uint256, uint256, uint256) {
+        return (
+            fatStorageTrees[index].treeData.treeId,
+            fatEventTrees[index].treeId,
+            skinnyStorageTrees[index].treeData.treeId,
+            skinnyEventTrees[index].treeId
+        );
+    }
+
     function reset() public {
         FatIMTPoseidon2WriteStorage.reset(fatStorageTrees[0]);
         SkinnyIMTPoseidon2WriteStorage.reset(skinnyStorageTrees[0]);
@@ -144,7 +162,10 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvent
 
     function insertMany(uint256[] calldata leaves) public {
         FatIMTPoseidon2WriteStorage.insertMany(fatStorageTrees[0], leaves);
-        SkinnyIMTPoseidon2WriteStorage.insertMany(skinnyStorageTrees[0], leaves);
+        SkinnyIMTPoseidon2WriteStorage.insertMany(
+            skinnyStorageTrees[0],
+            leaves
+        );
         FatIMTPoseidon2WriteEvent.insertMany(fatEventTrees[0], leaves);
         SkinnyIMTPoseidon2WriteEvent.insertMany(skinnyEventTrees[0], leaves);
     }
@@ -231,18 +252,33 @@ contract SkinnyFat is SkinnyIMTReadableStorage, FatIMTReadableStorage, IIMTEvent
         );
     }
 
-    function _assertRootMatch() private view returns(uint256) {
-        uint256 fatStorageRoot = FatIMTPoseidon2Read.root(fatStorageTrees[0].treeData);
+    function _assertRootMatch() private view returns (uint256) {
+        uint256 fatStorageRoot = FatIMTPoseidon2Read.root(
+            fatStorageTrees[0].treeData
+        );
         uint256 fatEventRoot = FatIMTPoseidon2Read.root(fatEventTrees[0]);
-        uint256 skinnyStorageRoot = SkinnyIMTPoseidon2Read.root(skinnyStorageTrees[0].treeData);
-        uint256 skinnyEventRoot = SkinnyIMTPoseidon2Read.root(skinnyEventTrees[0]);
-        require( fatStorageRoot == fatEventRoot, "fatStorageRoot does not match fatEventRoot");
-        require( fatStorageRoot == skinnyStorageRoot, "fatStorageRoot does not match skinnyStorageRoot");
-        require( fatStorageRoot == skinnyEventRoot, "fatStorageRoot does not match skinnyEventRoot");
+        uint256 skinnyStorageRoot = SkinnyIMTPoseidon2Read.root(
+            skinnyStorageTrees[0].treeData
+        );
+        uint256 skinnyEventRoot = SkinnyIMTPoseidon2Read.root(
+            skinnyEventTrees[0]
+        );
+        require(
+            fatStorageRoot == fatEventRoot,
+            "fatStorageRoot does not match fatEventRoot"
+        );
+        require(
+            fatStorageRoot == skinnyStorageRoot,
+            "fatStorageRoot does not match skinnyStorageRoot"
+        );
+        require(
+            fatStorageRoot == skinnyEventRoot,
+            "fatStorageRoot does not match skinnyEventRoot"
+        );
         return fatStorageRoot;
     }
 
-    function root() public view returns(uint256) {
-        return _assertRootMatch(); 
+    function root() public view returns (uint256) {
+        return _assertRootMatch();
     }
 }

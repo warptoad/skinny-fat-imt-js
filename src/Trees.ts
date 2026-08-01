@@ -141,10 +141,8 @@ export class Trees {
         // store finalized epoch and the FCR slot https://fastconfirm.it/
     }
 
-    async syncTreesEvent(treeIds: bigint[] = [], chunkSize=2000n) {
+    async syncTreesEvent(treeIds: bigint[] = [], chunkSize = 2000n) {
         const chainId = await this.publicClient.getChainId()
-        // const sizes: { [treeId: Hex]: bigint } = {}
-        // treeIds.forEach((id) => sizes[toHex(id)] = BigInt(Infinity))
         const leafEvents = ["NewLeaf", "UpdatedLeaf", "RepeatedLeafs", "TreeReset"]
         // sync backwards, sync every NewLeaf, UpdatedLeaf, RepeatedLeafs, TreeReset, event
         const safeBlockNum = (await this.publicClient.getBlock({ blockTag: 'safe' })).number
@@ -165,39 +163,81 @@ export class Trees {
             })
             //console.log({events})
         } else {
-            let unsyncedTrees = new Set(treeIds);
+            const treesAndLeaves: { [treeId: Hex]: { leaves: bigint[], count: bigint, targetSize: bigint } } = {}
+            let unsyncedTreesIds = new Set(treeIds.map((id) => toHex(id)));
             // at each chunk scanned, check if at least one tree is done syncing and exit early, so we can remove that tree
             // from the list
-            const newTreeEvents = ["NewTree",  "TreeReset"]
-            const quitOnFullTree: PostQueryEventFilter<ReadableEvent<"NewTree" | "TreeReset">> = (allEvents, chunkEvents) => {
-                const oneTreeFull = chunkEvents.some((event) => newTreeEvents.includes(event.eventName))
-                return [allEvents, oneTreeFull]
+            const quitOnAllTreesFull: PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">> = (allEvents, chunkEvents) => {
+                let quit = false;
+                for (const event of chunkEvents.toReversed()) {
+                    const treeId = toHex(event.args.treeId);
+                    if (quit === true && unsyncedTreesIds.has(treeId) === false) {
+                        // this treeId is already synced, don't touch it
+                        continue
+                    }
+                    if (event.eventName === "NewRoot") {
+                        if (treesAndLeaves[treeId] === undefined) {
+                            treesAndLeaves[treeId] = {
+                                leaves: [],
+                                count: 0n,
+                                targetSize: event.args.size,
+                            }
+                        }
+                    } else {
+                        const tree = treesAndLeaves[treeId]
+                        if (event.eventName === "RepeatedLeafs") {
+                            const start = Number(event.args.startIndex) // startIndex == inclusive, index = start is correct
+                            const end = Number(event.args.nextIndex) // nextIndex == exclusive, so index < end is correct here
+                            for (let index = start; index < end; index++) {
+                                if (tree.leaves[index] === undefined) {
+                                    tree.leaves[index] = event.args.leaf;
+                                    tree.count++;
+                                }
+                            }
+                        } else {
+                            const leafIndex = Number(event.args.index)
+                            if (tree.leaves[leafIndex] === undefined) {
+                                if (event.eventName === "NewLeaf") {
+                                    // @TODO this is not super scalable, but realistically on L1 you wont really hit numbers high
+                                    // enough, besides LeanIMT-js uses normal js arrays indexed by numbers so that is the first one to fail
+                                    // also due to ram usage
+                                    tree.leaves[leafIndex] = event.args.leaf
+                                    tree.count++;
+                                } else {
+                                    // if (event.eventName === "UpdatedLeaf")
+                                    tree.leaves[leafIndex] = event.args.newLeaf;
+                                    tree.count++;
+                                }
+                            }
+
+                            if (tree.count >= tree.targetSize) {
+                                unsyncedTreesIds.delete(treeId);
+                                quit = true;
+                            }
+                        }
+                    }
+                }
+                return [allEvents, quit]
             }
 
-            while (unsyncedTrees.size > 0) {
-                const events = await queryEventInChunks({
+            while (unsyncedTreesIds.size > 0) {
+                await queryMultiEventsInChunks({
                     publicClient: this.publicClient,
                     contract: await this.getContract(),
-                    eventName: "NewRoot",
+                    eventNames: ["NewRoot", "NewLeaf", "UpdatedLeaf", "RepeatedLeafs"],
                     // only our treeIds. treeId is the 1st indexed param of NewRoot, an array means "any of these"
-                    eventFilterArgs: { treeId: [...unsyncedTrees] },
+                    sharedEventFilterArgs: { treeId: [...unsyncedTreesIds].map((id) => BigInt(id)) },
                     // treeIds are known, so we only need to walk back far enough to see a NewRoot for each of them
                     firstBlock: BigInt(DEPLOY_BLOCK[chainId]),
                     lastBlock: safeBlockNum,
                     reverseOrder: true,
                     maxEvents: Infinity,
                     chunkSize: chunkSize,
-                    postQueryFilter: quitOnFullTree,
+                    postQueryFilter: quitOnAllTreesFull,
                 })
-
-                // only last chunk contains one or more NewTree/TreeReset events, rest does not contain any
-                for (const event of events.slice(0,Number(chunkSize))) {
-                    //event.eventName === "NewTree" || event.eventName === "TreeReset"
-                    if(newTreeEvents.includes(event.eventName)) {
-                        unsyncedTrees.delete(event.args.treeId)
-                    }
-                }
+                console.log(treesAndLeaves)
             }
+
         }
 
         // sync all treeIds until you hit the treeSize, periodically check if a tree is done and remove it from the list
