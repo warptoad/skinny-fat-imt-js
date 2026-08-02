@@ -1,6 +1,6 @@
 import { LeanIMT, type LeanIMTHashFunction } from "@zk-kit/lean-imt";
 import { poseidon2Hash } from "@zkpassport/poseidon2";
-import { getContract, toHex, type Abi, type AbiEvent, type Address, type GetContractReturnType, type Hex, type Log, type PublicClient } from "viem";
+import { getContract, toHex, type Abi, type AbiEvent, type Address, type GetContractReturnType, type Hex, type Log, type PublicClient, type WalletClient } from "viem";
 
 import { getInterfaceId, detectSupportedInterfaces, supportsInterface } from "./interfaceId.js";
 
@@ -26,6 +26,12 @@ import skinnyEventArtifact from "../artifacts/@warptoad/skinny-imt.sol/SkinnyIMT
 import IIMTEventsArtifact from "../artifacts/@warptoad/fat-imt.sol/interfaces/IIMTEvents.sol/IIMTEvents.json" with { type: "json" };
 import fatEventArtifact from "../artifacts/@warptoad/fat-imt.sol/FatIMTReadableEvent.sol/FatIMTReadableEvent.json" with { type: "json" };
 import { DEPLOY_BLOCK } from "./config.js";
+
+export type AnyContract = {
+    address: Address
+    abi: Abi
+    read: Record<string, (...args: any[]) => Promise<any>>
+}
 
 type ReadableStorageAbi = readonly [
     ...SkinnyIMTReadableStorage$Type["abi"],
@@ -91,12 +97,12 @@ type IFamilySupport = {
 };
 
 enum TREE_TYPE {
-    UNKNOWN,
-    NO_INTERFACE,
+    FAT_STORAGE,
+    FAT_EVENT,
     SKINNY_STORAGE,
     SKINNY_EVENT,
-    FAT_STORAGE,
-    FAT_EVENT
+    UNKNOWN,
+    NO_INTERFACE
 }
 
 export const LeanIMTHashFuncPoseidon2: LeanIMTHashFunction = (a: bigint, b: bigint) => poseidon2Hash([a, b])
@@ -123,28 +129,13 @@ export class Trees {
 
     }
 
-    async syncTrees(treeIds: bigint[]) {
-        // if unknown type, do type detection again, maybe it initialized?
-
-        // storage
-        // getSize (from tree.size)
-        // getLeavesStorage (debug->getLeaves)
-        // getLeavesEvents (only recent epoch, so can correct for re-orgs) 
-        // store finalized epoch and the FCR slot https://fastconfirm.it/
-        // ^ use events to re-wind to the finalized epoch leaves
-        // TODO later maybe we can snapshot at what block what leaf is at?
-
-        // event
-        // getSize (from a newRoot event at last finalized epoch and FCR slot)
-        // getLeavesEvents (backwards, from last finalized epoch till we sized up to tree.size )
-        // getLeavesEvents (forwards, )
-        // store finalized epoch and the FCR slot https://fastconfirm.it/
+    async syncTreesStorage(treeIds: bigint[]) {
     }
 
     async syncTreesEvent(treeIds: bigint[] = [], chunkSize = 2000n) {
         const syncAllIds = treeIds.length === 0
         const chainId = await this.publicClient.getChainId()
-        if(syncAllIds) {
+        if (syncAllIds) {
             console.warn(`No treeIds provided for event sync, scan will run all the way till block: ${DEPLOY_BLOCK[chainId]}, to auto discover all treeIds.`)
         }
         // sync backwards, sync every NewLeaf, UpdatedLeaf, RepeatedLeafs, TreeReset, event
@@ -231,9 +222,11 @@ export class Trees {
             console.log({ treesAndLeaves })
         } while (unsyncedTreesIds.size > 0)
 
-        // sync all treeIds until you hit the treeSize, periodically check if a tree is done and remove it from the list
-        // if treeIds were provided, step before should always have set size to not infinity
-        // if treeId were not provided, it would have collected all events already, 
+        const leanIMTTrees: { [treeId: Hex]: LeanIMT<bigint> } = {}
+        for (const [treeId, tree] of Object.entries(treesAndLeaves)) {
+            leanIMTTrees[treeId as Hex] = new LeanIMT(this.hashFunc, tree.leaves)
+        }
+        return leanIMTTrees;
     }
 
     async getContract(): Promise<ReadableContract> {
@@ -266,27 +259,34 @@ export class Trees {
     }
 }
 
-async function identifyTree(
+export async function identifyTree(
     treeId: bigint,
-    contract: ReadableContract,
+    contract: AnyContract,
 ) {
     // TODO we can dish out these calls concurrently. but storage always > event, remember storage inherits event!!
     let skinnyStorageProm, skinnyEventProm, fatStorageProm, fatEventProm
-    if ("getSkinnyLeavesBaseSlot" in contract.read) {
-        skinnyStorageProm = contract.read.getSkinnyLeavesBaseSlot([treeId])
-    } else if ("getSkinnySize" in contract.read) {
-        skinnyEventProm = (contract as unknown as ReadableContractSkinnyEvent).read.getSkinnySize([treeId])
-    } else if ("getFatLeavesBaseSlot" in contract.read) {
-        fatStorageProm = (contract as unknown as ReadableContractFatStorage).read.getFatLeavesBaseSlot([treeId])
-    } else if ("getFatSize" in contract.read) {
-        fatEventProm = (contract as unknown as ReadableContractFatEvent).read.getFatSize([treeId])
-    } else {
+    const differentiatingFunctions = ["getSkinnyLeavesBaseSlot", "getSkinnySize", "getFatLeavesBaseSlot", "getFatSize"]
+    const contractFunctions = contract.abi.filter((abi) => abi.type === "function" && "name" in abi && differentiatingFunctions.includes(abi.name)).map((abi) => (abi as any).name)
+    if (contractFunctions.length === 0) {
         // is okay we can still look for events! SkinnyEvent interface is not even use full while syncing, since we 
         // need events to get the leaves anyway. 
         // TODO we cant deal with NO_INTERFACE case rn because storage emits both repeatedLeaves and newLeaf which is double
         // prob not really a problem?
         return TREE_TYPE.NO_INTERFACE;
     }
+    if (contractFunctions.includes("getSkinnyLeavesBaseSlot")) {
+        skinnyStorageProm = contract.read.getSkinnyLeavesBaseSlot([treeId])
+    }
+    if (contractFunctions.includes("getSkinnySize")) {
+        skinnyEventProm = (contract as unknown as ReadableContractSkinnyEvent).read.getSkinnySize([treeId])
+    }
+    if (contractFunctions.includes("getFatLeavesBaseSlot")) {
+        fatStorageProm = (contract as unknown as ReadableContractFatStorage).read.getFatLeavesBaseSlot([treeId])
+    }
+    if (contractFunctions.includes("getFatSize")) {
+        fatEventProm = (contract as unknown as ReadableContractFatEvent).read.getFatSize([treeId])
+    }
+
 
     // @notice storage needs to come first in the arr, since both storage and event resolve if a tree type == STORAGE
     const proms = [skinnyStorageProm, skinnyEventProm, fatStorageProm, fatEventProm]

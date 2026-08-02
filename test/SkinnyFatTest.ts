@@ -6,7 +6,7 @@ import { poseidon2Hash } from "@zkpassport/poseidon2"
 import { network } from "hardhat";
 import type { SkinnyFat$Type } from "../artifacts/contracts/SkinnyFat.sol/artifacts.js";
 import { concat, sha256, toHex, type Account, type GetContractReturnType, type Hex, type PublicClient, type WalletClient } from "viem"
-import { Trees } from "../src/Trees.js";
+import { identifyTree, Trees } from "../src/Trees.js";
 
 export type WalletWithAccount = WalletClient & { account: Account };
 export type SkinnyFatContractType = GetContractReturnType<SkinnyFat$Type["abi"], WalletClient>;
@@ -109,8 +109,27 @@ describe("SkinnyFat", async function () {
 
     const trees = new Trees(SkinnyFatContract.address, publicClient)
     const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
-    await trees.syncTreesEvent([...treeIds])
-    await trees.syncTreesEvent()
+    const onchainRoot = await SkinnyFatContract.read.root()
+    const detectedTreeTypes = await Promise.all(treeIds.map(async (treeId)=>await identifyTree(treeId, SkinnyFatContract)))
+    console.log({treeTypes: detectedTreeTypes})
+
+    // both with the treeIds known up front, and with them auto discovered from the events
+    for (const [mode, reproducedTrees] of [
+      ["known treeIds", await trees.syncTreesEvent([...treeIds])],
+      ["auto discovered", await trees.syncTreesEvent()],
+    ] as const) {
+      assert.deepEqual(
+        Object.keys(reproducedTrees).sort(),
+        treeIds.map((id) => toHex(id)).sort(),
+        `${mode}: reproduced a different set of trees than the contract reports`
+      )
+      for (const [treeId, reproducedTree] of Object.entries(reproducedTrees)) {
+        // all 4 trees hold the same leaves, so each one has to come back to the same root
+        assert.equal(reproducedTree.size, jsTree.size, `${mode}: tree ${treeId} has the wrong size`)
+        assert.deepEqual(reproducedTree.leaves, jsTree.leaves, `${mode}: tree ${treeId} has the wrong leaves`)
+        assert.equal(reproducedTree.root, onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
+      }
+    }
   });
 });
 

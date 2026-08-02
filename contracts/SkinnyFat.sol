@@ -22,6 +22,7 @@ import {SkinnyIMTPoseidon2Read} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyI
 import {IIMTEvents} from "@warptoad/fat-imt.sol/interfaces/IIMTEvents.sol";
 
 error WrongTreeId();
+error TreeHasIncorrectType();
 // TODO nice to have also in the package, but zk-kit structure clashes, so maybe skinny-fat as one package?
 enum TreeType {
     SKINNY_STORAGE,
@@ -53,12 +54,12 @@ contract SkinnyFat is
             fatStorageTree
         );
         treeTypes[fatStorageTreeId] = TreeType.FAT_STORAGE;
-        indexOfTreeId[fatStorageTrees.length - 1] = fatStorageTreeId;
+        indexOfTreeId[fatStorageTreeId] = fatStorageTrees.length - 1;
 
         FatIMTDataEvent storage fatEventTree = fatEventTrees.push();
         uint256 fatEventTreeId = FatIMTPoseidon2WriteEvent.init(fatEventTree);
         treeTypes[fatEventTreeId] = TreeType.FAT_EVENT;
-        indexOfTreeId[fatEventTrees.length - 1] = fatEventTreeId;
+        indexOfTreeId[fatEventTreeId] = fatEventTrees.length - 1;
 
         SkinnyIMTDataStorage storage skinnyStorageTree = skinnyStorageTrees
             .push();
@@ -66,14 +67,14 @@ contract SkinnyFat is
             skinnyStorageTree
         );
         treeTypes[skinnyStorageTreeId] = TreeType.SKINNY_STORAGE;
-        indexOfTreeId[skinnyStorageTrees.length - 1] = skinnyStorageTreeId;
+        indexOfTreeId[skinnyStorageTreeId] = skinnyStorageTrees.length - 1;
 
         SkinnyIMTDataEvent storage skinnyEventTree = skinnyEventTrees.push();
         uint256 skinnyEventTreeId = SkinnyIMTPoseidon2WriteEvent.init(
             skinnyEventTree
         );
         treeTypes[skinnyEventTreeId] = TreeType.SKINNY_EVENT;
-        indexOfTreeId[skinnyEventTrees.length - 1] = skinnyEventTreeId;
+        indexOfTreeId[skinnyEventTreeId] = skinnyEventTrees.length - 1;
     }
 
     //
@@ -90,47 +91,51 @@ contract SkinnyFat is
         return super.supportsInterface(interfaceId);
     }
 
-    // overridable functions so SkinnyIMTFullNodeReadable and SkinnyIMTDataFullNode
-    // can find out where the tree is stored so it can expose a interface to get the leaves and storage slot for debug_getStorageRangeAt
-    function _getFatStorageTree(
-        uint256 //treeId, only one tree so no need for treeId for looking up a mapping for example
-    ) internal view virtual override returns (FatIMTDataStorage storage) {
-        return fatStorageTrees[0];
-    }
-
     // if you'r only using the storage variant, no need to override this SkinnyIMTReadableStorage just passes treeStorage.treeData along
     // if you use both tho do override like this!!
     // if you got more trees. You can store them in a mapping like this
     function _getSkinnyEventTree(
         uint256 treeId
     ) internal view virtual override returns (SkinnyIMTDataEvent storage) {
-        if (treeTypes[treeId] == TreeType.SKINNY_STORAGE) {
-            return skinnyStorageTrees[indexOfTreeId[treeId]].treeData;
-        } else if (treeTypes[treeId] == TreeType.SKINNY_EVENT) {
-            return skinnyEventTrees[indexOfTreeId[treeId]];
-        } else {
-            revert WrongTreeId();
+        uint256 index = indexOfTreeId[treeId];
+        if (treeTypes[treeId] != TreeType.SKINNY_EVENT) {
+            revert TreeHasIncorrectType();
         }
+        return skinnyEventTrees[index];
     }
 
     // overridable functions so SkinnyIMTFullNodeReadable and SkinnyIMTDataFullNode
     // can find out where the tree is stored so it can expose a interface to get the leaves and storage slot for debug_getStorageRangeAt
     function _getSkinnyStorageTree(
-        uint256 //treeId
+        uint256 treeId
     ) internal view virtual override returns (SkinnyIMTDataStorage storage) {
-        return skinnyStorageTrees[0];
+        uint256 index = indexOfTreeId[treeId];
+        if (treeTypes[treeId] != TreeType.SKINNY_STORAGE) {
+            revert TreeHasIncorrectType();
+        }
+        return skinnyStorageTrees[index];
     }
 
     function _getFatEventTree(
         uint256 treeId
     ) internal view virtual override returns (FatIMTDataEvent storage) {
-        if (treeTypes[treeId] == TreeType.FAT_STORAGE) {
-            return fatStorageTrees[indexOfTreeId[treeId]].treeData;
-        } else if (treeTypes[treeId] == TreeType.FAT_EVENT) {
-            return fatEventTrees[indexOfTreeId[treeId]];
-        } else {
-            revert WrongTreeId();
+        uint256 index = indexOfTreeId[treeId];
+        if (treeTypes[treeId] != TreeType.FAT_EVENT) {
+            revert TreeHasIncorrectType();
         }
+        return fatEventTrees[index];
+    }
+
+    // overridable functions so SkinnyIMTFullNodeReadable and SkinnyIMTDataFullNode
+    // can find out where the tree is stored so it can expose a interface to get the leaves and storage slot for debug_getStorageRangeAt
+    function _getFatStorageTree(
+        uint256 treeId
+    ) internal view virtual override returns (FatIMTDataStorage storage) {
+        uint256 index = indexOfTreeId[treeId];
+        if (treeTypes[treeId] != TreeType.FAT_STORAGE) {
+            revert TreeHasIncorrectType();
+        }
+        return fatStorageTrees[index];
     }
 
     function getTreeIds(
