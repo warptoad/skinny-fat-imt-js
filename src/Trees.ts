@@ -25,7 +25,7 @@ import fatStorageArtifact from "../artifacts/@warptoad/fat-imt.sol/FatIMTReadabl
 import skinnyEventArtifact from "../artifacts/@warptoad/skinny-imt.sol/SkinnyIMTReadableEvent.sol/SkinnyIMTReadableEvent.json" with { type: "json" };
 import IIMTEventsArtifact from "../artifacts/@warptoad/fat-imt.sol/interfaces/IIMTEvents.sol/IIMTEvents.json" with { type: "json" };
 import fatEventArtifact from "../artifacts/@warptoad/fat-imt.sol/FatIMTReadableEvent.sol/FatIMTReadableEvent.json" with { type: "json" };
-import { DEPLOY_BLOCK } from "./config.js";
+import { DEPLOY_BLOCK, getDeploymentBlock } from "./config.js";
 
 export type AnyContract = {
     address: Address
@@ -97,18 +97,20 @@ type IFamilySupport = {
 };
 
 enum TREE_TYPE {
+    UNKNOWN,
     FAT_STORAGE,
     FAT_EVENT,
     SKINNY_STORAGE,
     SKINNY_EVENT,
-    UNKNOWN,
     NO_INTERFACE
 }
 
 export const LeanIMTHashFuncPoseidon2: LeanIMTHashFunction = (a: bigint, b: bigint) => poseidon2Hash([a, b])
 
+export type CachedTree = { tree: LeanIMT<bigint>, type: TREE_TYPE, lastSynced: bigint }
+
 export class Trees {
-    private trees: { [treeId: Hex]: { tree: LeanIMT<bigint>, type: TREE_TYPE } } = {}
+    private trees: { [treeId: Hex]: CachedTree } = {}
 
     public contractAddress: Address;
     public contract!: ReadableContract;
@@ -133,75 +135,84 @@ export class Trees {
     }
 
     async syncTreesEvent(treeIds: bigint[] = [], chunkSize = 2000n) {
-        const syncAllIds = treeIds.length === 0
+        const discoverAllIds = treeIds.length === 0
         const chainId = await this.publicClient.getChainId()
-        if (syncAllIds) {
-            console.warn(`No treeIds provided for event sync, scan will run all the way till block: ${DEPLOY_BLOCK[chainId]}, to auto discover all treeIds.`)
+        if (discoverAllIds) {
+            console.warn(`No treeIds provided for event sync, scan will run all the way till block: ${getDeploymentBlock(chainId)}, to auto discover all treeIds.`)
         }
-        // sync backwards, sync every NewLeaf, UpdatedLeaf, RepeatedLeafs, TreeReset, event
-        const safeBlockNum = (await this.publicClient.getBlock({ blockTag: 'safe' })).number
+        // sync backwards, sync every NewLeaf, UpdatedLeaf, RepeatedLeafs, event
+        const lastBlock = (await this.publicClient.getBlock({ blockTag: 'safe' })).number
+        let nextSyncLastBlock = lastBlock;
+        // in discovery we go all the way down, if treeIds are provided, we go down till all them are synced
+        // if all of them are synced before, we don't sync all leaves, just those who happened after the most out of date tree was synced at
+        const firstBlock = discoverAllIds ? BigInt(getDeploymentBlock(chainId)) : this.getOldestSyncBlock(treeIds)
 
+        // SIZE MISMATCH, LASTSYNC_BLOCK 
 
-        const treesAndLeaves: { [treeId: Hex]: { leaves: bigint[], count: bigint, targetSize: bigint } } = {}
+        const newSyncStatePerTree: { [treeId: Hex]: { leaves: bigint[], count: bigint, targetSize: bigint } } = {}
         let unsyncedTreesIds = new Set(treeIds.map((id) => toHex(id)));
         // at each chunk scanned, check if at least one tree is done syncing and exit early, so we can remove that tree
         // from the list
-        const geLeavesQuitEarly: PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">> = (allEvents, chunkEvents) => {
+        // TODO move this out, to a real function
+        const geLeavesQuitEarly: PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">> = (allEvents, chunkEvents, startBlock, endBlock) => {
             let quit = false;
             for (const event of chunkEvents.toReversed()) {
                 const treeId = toHex(event.args.treeId);
                 if (event.eventName === "NewRoot") {
-                    if (treesAndLeaves[treeId] === undefined) {
-                        treesAndLeaves[treeId] = {
+                    if (newSyncStatePerTree[treeId] === undefined) {
+                        newSyncStatePerTree[treeId] = {
                             leaves: [],
                             count: 0n,
                             targetSize: event.args.size,
                         }
                     }
-                } else {
-                    const tree = treesAndLeaves[treeId]
-                    if (tree.count >= tree.targetSize) {
-                        // this treeId is already synced, don't touch it
-                        continue
-                    }
-                    if (event.eventName === "RepeatedLeafs") {
-                        const start = Number(event.args.startIndex) // startIndex == inclusive, index = start is correct
-                        const end = Number(event.args.nextIndex) // nextIndex == exclusive, so index < end is correct here
-                        for (let index = start; index < end; index++) {
-                            if (tree.leaves[index] === undefined) {
-                                tree.leaves[index] = event.args.leaf;
-                                tree.count++;
-                            }
-                        }
-                    } else {
-                        const leafIndex = Number(event.args.index)
-                        if (tree.leaves[leafIndex] === undefined) {
-                            if (event.eventName === "NewLeaf") {
-                                // @TODO this is not super scalable, but realistically on L1 you wont really hit numbers high
-                                // enough, besides LeanIMT-js uses normal js arrays indexed by numbers so that is the first one to fail
-                                // also due to ram usage
-                                tree.leaves[leafIndex] = event.args.leaf
-                                tree.count++;
-                            } else {
-                                // if (event.eventName === "UpdatedLeaf")
-                                tree.leaves[leafIndex] = event.args.newLeaf;
-                                tree.count++;
-                            }
+                }
+                const tree = newSyncStatePerTree[treeId]
+                if (tree.count >= tree.targetSize) {
+                    unsyncedTreesIds.delete(treeId);
+                    quit = true;
+                    continue
+                }
+                if (event.eventName === "RepeatedLeafs") {
+                    const start = Number(event.args.startIndex) // startIndex == inclusive, index = start is correct
+                    const end = Number(event.args.nextIndex) // nextIndex == exclusive, so index < end is correct here
+                    for (let index = start; index < end; index++) {
+                        if (tree.leaves[index] === undefined) {
+                            tree.leaves[index] = event.args.leaf;
+                            tree.count++;
                         }
                     }
-
-                    if (tree.count >= tree.targetSize) {
-                        unsyncedTreesIds.delete(treeId);
-                        quit = true;
+                } else if (event.eventName !== "NewRoot") {
+                    const leafIndex = Number(event.args.index)
+                    if (tree.leaves[leafIndex] === undefined) {
+                        if (event.eventName === "NewLeaf") {
+                            // @TODO this is not super scalable, but realistically on L1 you wont really hit numbers high
+                            // enough, besides LeanIMT-js uses normal js arrays indexed by numbers so that is the first one to fail
+                            // also due to ram usage
+                            tree.leaves[leafIndex] = event.args.leaf
+                            tree.count++;
+                        } else {
+                            // if (event.eventName === "UpdatedLeaf")
+                            tree.leaves[leafIndex] = event.args.newLeaf;
+                            tree.count++;
+                        }
                     }
                 }
             }
-            return [allEvents, quit]
+            // we process all events on every chunk right away, we don't need allEvents, so just discard all events to save memory
+            // [allEvents, quit]
+            // `startBlock === firstBlock` <= detects, "is last chunk", assumes scanning backwards
+            if (quit || startBlock === firstBlock) {
+                nextSyncLastBlock = startBlock
+            }
+
+            return [[], quit]
         }
 
-        const geLeavesQuitNever: PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">> = (allEvents, chunkEvents) => {
-            geLeavesQuitEarly(allEvents, chunkEvents);
-            return [allEvents, false]
+        const geLeavesQuitNever: PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">> = (allEvents, chunkEvents,firstBlock, lastBlock) => {
+            geLeavesQuitEarly(allEvents, chunkEvents, firstBlock, lastBlock);
+            // geLeavesQuitEarly processes the events and adds to treesAndLeaves, but we just never quit!!!
+            return [[], false]
         }
 
         do {
@@ -210,23 +221,51 @@ export class Trees {
                 contract: await this.getContract(),
                 eventNames: ["NewRoot", "NewLeaf", "UpdatedLeaf", "RepeatedLeafs"],
                 // only our treeIds. treeId is the 1st indexed param of NewRoot, an array means "any of these"
-                sharedEventFilterArgs: syncAllIds ? undefined : { treeId: [...unsyncedTreesIds].map((id) => BigInt(id)) },
-                firstBlock: BigInt(DEPLOY_BLOCK[chainId]),
-                lastBlock: safeBlockNum,
+                sharedEventFilterArgs: discoverAllIds ? undefined : { treeId: [...unsyncedTreesIds].map((id) => BigInt(id)) },
+                firstBlock: firstBlock,
+                lastBlock: nextSyncLastBlock,
                 reverseOrder: true,
                 maxEvents: Infinity,
                 chunkSize: chunkSize,
                 // if we need all treeIds?
-                postQueryFilter: syncAllIds ? geLeavesQuitNever : geLeavesQuitEarly,
+                postQueryFilter: discoverAllIds ? geLeavesQuitNever : geLeavesQuitEarly,
             })
-            console.log({ treesAndLeaves })
-        } while (unsyncedTreesIds.size > 0)
+        } while (unsyncedTreesIds.size > 0 && nextSyncLastBlock > firstBlock)
 
-        const leanIMTTrees: { [treeId: Hex]: LeanIMT<bigint> } = {}
-        for (const [treeId, tree] of Object.entries(treesAndLeaves)) {
-            leanIMTTrees[treeId as Hex] = new LeanIMT(this.hashFunc, tree.leaves)
+        // cache the tree, or update the new/updated leafs of an existing cache tree.
+        const syncedTrees: { [treeId: Hex]: CachedTree } = {}
+        const allTreeIds = new Set([...treeIds.map((id)=>toHex(id)), ...Object.keys(newSyncStatePerTree) as Hex[]])
+        for (const treeId of allTreeIds) {
+            const newSyncState = newSyncStatePerTree[treeId]
+            const cacheTree = this.trees[treeId];
+            if (newSyncState && cacheTree && (BigInt(cacheTree.tree.size) <= newSyncState.targetSize)) {
+                const updatedIndexes: number[] = [];
+                const updatedLeaves: bigint[] = [];
+                const newLeafs: bigint[] = [];
+                newSyncState.leaves.forEach((leaf, index) => {
+                    if (index < cacheTree.tree.size) {
+                        updatedLeaves.push(leaf)
+                        updatedIndexes.push(index)
+                    } else {
+                        newLeafs.push(leaf)
+                    }
+                })
+                cacheTree.tree.updateMany(updatedIndexes, updatedLeaves)
+                if (newLeafs.length > 0) {
+                    cacheTree.tree.insertMany(newLeafs)
+                }
+
+                cacheTree.lastSynced = lastBlock
+            } else {
+                this.trees[treeId] = {
+                    tree: new LeanIMT(this.hashFunc, newSyncState ? newSyncState.leaves : []),
+                    type: this.trees[treeId] ? this.trees[treeId].type : await identifyTree(BigInt(treeId), this.contract),
+                    lastSynced: lastBlock
+                }
+            }
+            syncedTrees[treeId] = this.trees[treeId];
         }
-        return leanIMTTrees;
+        return syncedTrees;
     }
 
     async getContract(): Promise<ReadableContract> {
@@ -250,11 +289,33 @@ export class Trees {
         }
     }
 
-    async initTree(treeId: Hex, hashFunc: LeanIMTHashFunction) {
+    getOldestSyncTreeId(treeIds: Hex[]): Hex {
+        let oldest = treeIds[0];
+        let oldestBlock = 2n ** 256n; // Infinity replacement
+        for (const id of treeIds) {
+            const tree = this.trees[id]
+            if (tree === undefined) {
+                return id
+            }
+            if (tree.lastSynced < oldestBlock) {
+                oldestBlock = tree.lastSynced
+                oldest = id
+            }
+        }
+        return oldest
+    }
+
+    getOldestSyncBlock(treeIds: bigint[]) {
+        const oldestTree = this.trees[this.getOldestSyncTreeId(treeIds.map((id) => toHex(id)))]
+        return oldestTree ? oldestTree.lastSynced : 0n
+    }
+
+    async initTree(treeId: Hex, chainId: number) {
         const treeType = await identifyTree(BigInt(treeId), await this.getContract());
         this.trees[treeId] = {
             tree: new LeanIMT(this.hashFunc),
-            type: treeType
+            type: treeType,
+            lastSynced: BigInt(getDeploymentBlock(chainId))
         }
     }
 }
@@ -302,4 +363,5 @@ export async function identifyTree(
     // usually un-initialized or does not exist
     return TREE_TYPE.UNKNOWN
 }
+
 

@@ -125,10 +125,57 @@ describe("SkinnyFat", async function () {
       )
       for (const [treeId, reproducedTree] of Object.entries(reproducedTrees)) {
         // all 4 trees hold the same leaves, so each one has to come back to the same root
-        assert.equal(reproducedTree.size, jsTree.size, `${mode}: tree ${treeId} has the wrong size`)
-        assert.deepEqual(reproducedTree.leaves, jsTree.leaves, `${mode}: tree ${treeId} has the wrong leaves`)
-        assert.equal(reproducedTree.root, onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
+        assert.equal(reproducedTree.tree.size, jsTree.size, `${mode}: tree ${treeId} has the wrong size`)
+        assert.deepEqual(reproducedTree.tree.leaves, jsTree.leaves, `${mode}: tree ${treeId} has the wrong leaves`)
+        assert.equal(reproducedTree.tree.root, onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
       }
+    }
+  });
+
+  // timeout so a resync that never terminates fails the test instead of hanging the run
+  it("Should shrink a cached tree back to empty after a reset", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    // fill all 4 trees, then sync so they end up in the cache
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    const filled = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(filled)) {
+      assert.equal(tree.tree.size, 5, `tree ${treeId} did not sync its 5 leaves`)
+    }
+
+    // reset drops every tree back to size 0, which only shows up as NewRoot(treeId, 0, 0)
+    await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
+
+    // re-syncing the same Trees instance has to shrink the cached trees, not keep the stale leaves
+    const afterReset = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(afterReset)) {
+      assert.equal(tree.tree.size, 0, `tree ${treeId} kept stale leaves after a reset`)
+      assert.deepEqual(tree.tree.leaves, [], `tree ${treeId} kept stale leaves after a reset`)
+    }
+  });
+
+  // the incremental path: the second sync only sees the *new* leaves, so `count` never reaches
+  // `targetSize` and no tree is ever removed from unsyncedTreesIds. Must still terminate, and merge.
+  it("Should resync incrementally when leaves are appended after a sync", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    const filled = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(filled)) {
+      assert.equal(tree.tree.size, 5, `tree ${treeId} did not sync its 5 leaves`)
+    }
+
+    // append after the first sync, so only these two land in the second sync's block range
+    await SkinnyFatContract.write.insertMany([[6n, 7n]], { account: deployer.account, chain: publicClient.chain })
+
+    const expected = [1n, 2n, 3n, 4n, 5n, 6n, 7n]
+    const onchainRoot = await SkinnyFatContract.read.root()
+    const appended = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(appended)) {
+      assert.deepEqual(tree.tree.leaves, expected, `tree ${treeId} has the wrong leaves after an incremental sync`)
+      assert.equal(tree.tree.root, onchainRoot, `tree ${treeId} does not match the onchain root`)
     }
   });
 });

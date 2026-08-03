@@ -4,3 +4,8 @@ export const DEPLOY_BLOCK:{[chainId:number]:number} = {
     1:          25700000,   // mainnet      (not deployed yet)
     324:        71400000,   // zk-sync era  (not deployed yet)
 }
+
+export function getDeploymentBlock(chainId:number) {
+    const block = DEPLOY_BLOCK[chainId]
+    return block ? block : 0n
+}

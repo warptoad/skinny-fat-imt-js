@@ -26,7 +26,7 @@ export type EventLog<TAbiEvent extends AbiEvent> =
     TAbiEvent extends AbiEvent ? Log<bigint, number, false, TAbiEvent, true> : never;
 
 
-export type PostQueryEventFilter<TAbiEvent extends AbiEvent> = (allEvents: EventLog<TAbiEvent>[], newChunkEvents: EventLog<TAbiEvent>[]) => [result:EventLog<TAbiEvent>[],quitEarly:boolean]
+export type PostQueryEventFilter<TAbiEvent extends AbiEvent> = (allEvents: EventLog<TAbiEvent>[], newChunkEvents: EventLog<TAbiEvent>[],firstBlock:bigint, lastBlock:bigint) => [result:EventLog<TAbiEvent>[],quitEarly:boolean]
 
 
 type UnionToIntersection<TUnion> =
@@ -370,37 +370,40 @@ async function scanInChunks<TAbiEvent extends AbiEvent>({
     reverseOrder: boolean;
     maxEvents: number;
     chunkSize: bigint;
-    postQueryFilter?: (allEvents: EventLog<TAbiEvent>[], newChunkEvents: EventLog<TAbiEvent>[]) => [EventLog<TAbiEvent>[],boolean];
+    postQueryFilter?: PostQueryEventFilter<TAbiEvent>
 }): Promise<EventLog<TAbiEvent>[]> {
     lastBlock ??= await publicClient.getBlockNumber();
     let allEvents: EventLog<TAbiEvent>[] = [];
     let done = false;
 
-    const scanLogic = async (index: bigint) => {
+    const scanLogic = async (index: bigint):Promise<[EventLog<TAbiEvent>[], bigint, bigint]> => {
         const start = firstBlock + index * chunkSize;
         const stop  = minBigInt(start + chunkSize - 1n, lastBlock);
-        return await queryChunk(start, stop);
+        return [(await queryChunk(start, stop)), start, stop];
     };
 
     const range = lastBlock - firstBlock + 1n;
     const numIters = Math.ceil(Number(range) / Number(chunkSize));
-
     if (reverseOrder) {
         for (let index = BigInt(numIters - 1); index >= 0n; index--) {
-            const events = await scanLogic(index);
-            allEvents = [...events, ...allEvents];
+            const [events, firstBlock, lastBlock] = await scanLogic(index);
+            allEvents = [...events as EventLog<TAbiEvent>[], ...allEvents];
             if (postQueryFilter) {
-                [allEvents, done] = postQueryFilter(allEvents, events)
+                [allEvents, done] = postQueryFilter(allEvents, events, firstBlock, lastBlock)
             }
             allEvents = allEvents.slice(-maxEvents);
-            if (done || allEvents.length >= maxEvents) {console.log(`stopped scanning at chunk ${index}/${numIters-1}`);break};
+            if (done || allEvents.length >= maxEvents) {
+                console.log(`stopped scanning at chunk ${index}/${numIters-1}`);
+                break
+            };
         }
+        
     } else {
         for (let index = 0n; index < BigInt(numIters); index++) {
-            const events = await scanLogic(index);
-            allEvents = [...allEvents, ...events];
+            const [events, firstBlock, lastBlock] = await scanLogic(index);
+            allEvents = [...allEvents, ...events as EventLog<TAbiEvent>[]];
             if (postQueryFilter) {
-                [allEvents, done] = postQueryFilter(allEvents, events)
+                [allEvents, done] = postQueryFilter(allEvents, events, firstBlock, lastBlock)
             }
             allEvents = allEvents.slice(0, maxEvents);
             if (done || allEvents.length >= maxEvents) {console.log(`stopped scanning at chunk ${index}/${numIters-1}`);break};
