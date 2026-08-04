@@ -19,6 +19,12 @@ function randomLeaf(seed: Hex, label: string): bigint {
   return BigInt(sha256(concat([seed, toHex(label)]))) % SNARK_SCALAR_FIELD
 }
 
+// An empty LeanIMT has no root, so `.root` reads back as undefined. The contract reports 0n for an
+// empty tree, so normalize to that to keep the two comparable after a reset.
+function rootOf(tree: LeanIMT<bigint>): bigint {
+  return tree.root ?? 0n
+}
+
 // TODO add this to the lib, or maybe make pr to LeanIMT js?
 // Builds a shared (deduplicated) multiproof for `rawIndices` against `tree`, in
 // the flat shape `_proofManyToRoot` expects:
@@ -101,11 +107,11 @@ describe("SkinnyFat", async function () {
     });
   })
 
-  const seed = "0x61cd64bd14c927ff4f8658bc16d2ca9d5e0d5797f1c912f8279c884918575037" ///toHex(crypto.getRandomValues(new Uint8Array(32)))
+  const seed = toHex(crypto.getRandomValues(new Uint8Array(32)))
   it(`Should all operations at least twice with random seed: ${seed}`, async function () {
     let jsTree = new LeanIMT((a, b) => poseidon2Hash([a, b]))
     jsTree = await randomTree(SkinnyFatContract, jsTree, seed, deployer, publicClient)
-    assert.equal(jsTree.root, await SkinnyFatContract.read.root())
+    assert.equal(rootOf(jsTree), await SkinnyFatContract.read.root())
 
     const trees = new Trees(SkinnyFatContract.address, publicClient)
     const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
@@ -116,7 +122,7 @@ describe("SkinnyFat", async function () {
     // both with the treeIds known up front, and with them auto discovered from the events
     for (const [mode, reproducedTrees] of [
       ["known treeIds", await trees.syncTreesEvent([...treeIds])],
-      ["auto discovered", await trees.syncTreesEvent()],
+      ["auto discovered", await trees.syncTreesEvent([],{autoDiscovery:true})],
     ] as const) {
       assert.deepEqual(
         Object.keys(reproducedTrees).sort(),
@@ -127,7 +133,7 @@ describe("SkinnyFat", async function () {
         // all 4 trees hold the same leaves, so each one has to come back to the same root
         assert.equal(reproducedTree.tree.size, jsTree.size, `${mode}: tree ${treeId} has the wrong size`)
         assert.deepEqual(reproducedTree.tree.leaves, jsTree.leaves, `${mode}: tree ${treeId} has the wrong leaves`)
-        assert.equal(reproducedTree.tree.root, onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
+        assert.equal(rootOf(reproducedTree.tree), onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
       }
     }
   });
@@ -155,6 +161,26 @@ describe("SkinnyFat", async function () {
     }
   });
 
+  // Same reset, but reconstructed from scratch by a Trees with no cache to shrink, and checked
+  // against the contract instead of against an expected size. Fails until _reset clears the node
+  // storage: root() reads the stale sideNodes/nodes of the pre-reset tree and reverts.
+  it("Should sync a freshly reset tree from scratch and agree with the onchain root", { timeout: 30_000 }, async function () {
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
+
+    const onchainRoot = await SkinnyFatContract.read.root()
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const reproduced = await trees.syncTreesEvent([...treeIds])
+
+    assert.deepEqual(Object.keys(reproduced).sort(), treeIds.map((id) => toHex(id)).sort())
+    for (const [treeId, tree] of Object.entries(reproduced)) {
+      assert.deepEqual(tree.tree.leaves, [], `tree ${treeId} reconstructed leaves for a reset tree`)
+      assert.equal(rootOf(tree.tree), onchainRoot, `tree ${treeId} does not match the onchain root`)
+    }
+  });
+
   // the incremental path: the second sync only sees the *new* leaves, so `count` never reaches
   // `targetSize` and no tree is ever removed from unsyncedTreesIds. Must still terminate, and merge.
   it("Should resync incrementally when leaves are appended after a sync", { timeout: 30_000 }, async function () {
@@ -176,6 +202,27 @@ describe("SkinnyFat", async function () {
     for (const [treeId, tree] of Object.entries(appended)) {
       assert.deepEqual(tree.tree.leaves, expected, `tree ${treeId} has the wrong leaves after an incremental sync`)
       assert.equal(tree.tree.root, onchainRoot, `tree ${treeId} does not match the onchain root`)
+    }
+  });
+
+  // syncToRoot pins the sync to a historic root: the newest NewRoot must be ignored and the scan
+  // has to keep walking back until it finds the NewRoot carrying the pinned root.
+  it("Should sync to a pinned historic root instead of the current one", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    const pinnedRoot = await SkinnyFatContract.read.root()
+
+    // move the trees past the pinned root, so the newest NewRoot is a different one
+    await SkinnyFatContract.write.insertMany([[6n, 7n]], { account: deployer.account, chain: publicClient.chain })
+    assert.notEqual(await SkinnyFatContract.read.root(), pinnedRoot, "the second insert did not change the root")
+
+    const pinnedTrees = await trees.syncTreesEvent([...treeIds], {syncToRoot: pinnedRoot})
+    assert.deepEqual(Object.keys(pinnedTrees).sort(), treeIds.map((id) => toHex(id)).sort())
+    for (const [treeId, tree] of Object.entries(pinnedTrees)) {
+      assert.deepEqual(tree.tree.leaves, [1n, 2n, 3n, 4n, 5n], `tree ${treeId} did not stop at the pinned root`)
+      assert.equal(tree.tree.root, pinnedRoot, `tree ${treeId} does not match the pinned root`)
     }
   });
 });
@@ -273,6 +320,18 @@ async function randomUpdateMany(
 
 }
 
+async function randomReset(
+  SkinnyFatContract: SkinnyFatContractType,
+  jsTree: LeanIMT,
+  seed: Hex,
+  WalletClient: WalletWithAccount,
+  publicClient: PublicClient
+) {
+  await SkinnyFatContract.write.reset({ account: WalletClient.account, chain: publicClient.chain });
+  // LeanIMT has no reset, so mirror it with a fresh tree carrying the same hash function
+  return new LeanIMT((jsTree as any)._hash)
+}
+
 async function randomTree(
   SkinnyFatContract: SkinnyFatContractType,
   jsTree: LeanIMT,
@@ -286,6 +345,7 @@ async function randomTree(
     randomInsertRepeated,
     randomUpdate,
     randomUpdateMany,
+    randomReset,
   ],
   numTxs = 10
 ) {
