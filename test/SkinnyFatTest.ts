@@ -138,6 +138,48 @@ describe("SkinnyFat", async function () {
     }
   });
 
+  // Same as the random seed test, but with a chunkSize small enough that the backwards scan has to
+  // walk several chunks. Catches state that only survives within a single query (a tree that is
+  // only completed by merging events across chunk boundaries, an early-quit that fires too soon).
+  const chunkedSeed = toHex(crypto.getRandomValues(new Uint8Array(32)))
+  it(`Should all operations at least twice with random seed, synced in multiple chunks: ${chunkedSeed}`, async function () {
+    const chunkSize = 10n
+    let jsTree = new LeanIMT((a, b) => poseidon2Hash([a, b]))
+    const startBlock = await publicClient.getBlockNumber()
+    // more txs than the default, so the block span comfortably outruns chunkSize
+    jsTree = await randomTree(SkinnyFatContract, jsTree, chunkedSeed, deployer, publicClient, 0, undefined, 40)
+    assert.equal(rootOf(jsTree), await SkinnyFatContract.read.root())
+
+    // the whole point of this test: the scan must not fit in one chunk
+    const endBlock = await publicClient.getBlockNumber()
+    assert.ok(
+      endBlock - startBlock > chunkSize,
+      `only ${endBlock - startBlock} blocks were written, that fits in a single chunk of ${chunkSize}`
+    )
+
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+    const onchainRoot = await SkinnyFatContract.read.root()
+
+    // both with the treeIds known up front, and with them auto discovered from the events
+    for (const [mode, reproducedTrees] of [
+      ["known treeIds", await trees.syncTreesEvent([...treeIds], { chunkSize })],
+      ["auto discovered", await trees.syncTreesEvent([], { autoDiscovery: true, chunkSize })],
+    ] as const) {
+      assert.deepEqual(
+        Object.keys(reproducedTrees).sort(),
+        treeIds.map((id) => toHex(id)).sort(),
+        `${mode}: reproduced a different set of trees than the contract reports`
+      )
+      for (const [treeId, reproducedTree] of Object.entries(reproducedTrees)) {
+        // all 4 trees hold the same leaves, so each one has to come back to the same root
+        assert.equal(reproducedTree.tree.size, jsTree.size, `${mode}: tree ${treeId} has the wrong size`)
+        assert.deepEqual(reproducedTree.tree.leaves, jsTree.leaves, `${mode}: tree ${treeId} has the wrong leaves`)
+        assert.equal(rootOf(reproducedTree.tree), onchainRoot, `${mode}: tree ${treeId} does not match the onchain root`)
+      }
+    }
+  });
+
   // timeout so a resync that never terminates fails the test instead of hanging the run
   it("Should shrink a cached tree back to empty after a reset", { timeout: 30_000 }, async function () {
     const trees = new Trees(SkinnyFatContract.address, publicClient)
@@ -224,6 +266,93 @@ describe("SkinnyFat", async function () {
       assert.deepEqual(tree.tree.leaves, [1n, 2n, 3n, 4n, 5n], `tree ${treeId} did not stop at the pinned root`)
       assert.equal(tree.tree.root, pinnedRoot, `tree ${treeId} does not match the pinned root`)
     }
+  });
+
+  // Same pinning, but the cache is already *ahead* of the pinned root: the trees were fully synced to
+  // the newer state first, so syncing back to an older root has to shrink the cached tree instead of
+  // merging into it.
+  it("Should sync back to a root older than what is already in the cache", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    const pinnedRoot = await SkinnyFatContract.read.root()
+
+    // first sync: the cache now holds the 5 leaf state
+    const filled = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(filled)) {
+      assert.equal(tree.tree.size, 5, `tree ${treeId} did not sync its 5 leaves`)
+    }
+
+    // move past the pinned root and sync again, so the cache is ahead of it
+    await SkinnyFatContract.write.insertMany([[6n, 7n]], { account: deployer.account, chain: publicClient.chain })
+    const ahead = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(ahead)) {
+      assert.equal(tree.tree.size, 7, `tree ${treeId} did not sync its 7 leaves`)
+    }
+
+    // now ask for the older root back
+    const pinnedTrees = await trees.syncTreesEvent([...treeIds], { syncToRoot: pinnedRoot })
+    assert.deepEqual(Object.keys(pinnedTrees).sort(), treeIds.map((id) => toHex(id)).sort())
+    for (const [treeId, tree] of Object.entries(pinnedTrees)) {
+      assert.deepEqual(tree.tree.leaves, [1n, 2n, 3n, 4n, 5n], `tree ${treeId} kept leaves newer than the pinned root`)
+      assert.equal(tree.tree.root, pinnedRoot, `tree ${treeId} does not match the pinned root`)
+    }
+  });
+
+  // Guards the rewind's `lastSynced`: if it is stamped at the head block instead of the block of the
+  // root it actually synced to, the next plain sync starts above the blocks it still needs. The leaves
+  // it misses stay holes in the sparse `leaves` array, which `forEach` skips, so they are never filled
+  // and the newer ones get appended at the wrong indexes instead.
+  it("Should still catch back up to head after being rewound to an older root", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    const pinnedRoot = await SkinnyFatContract.read.root()
+    await trees.syncTreesEvent([...treeIds])
+
+    // two separate blocks after the pinned root, so the older one is not the block the next sync
+    // rescans anyway (its firstBlock is inclusive, which would hide the bug)
+    await SkinnyFatContract.write.insertMany([[6n, 7n]], { account: deployer.account, chain: publicClient.chain })
+    await SkinnyFatContract.write.insertMany([[8n, 9n]], { account: deployer.account, chain: publicClient.chain })
+    await trees.syncTreesEvent([...treeIds])
+
+    // rewind to the older root, then let the chain move on
+    const treePinned = await trees.syncTreesEvent([...treeIds], { syncToRoot: pinnedRoot })
+    await SkinnyFatContract.write.insertMany([[10n]], { account: deployer.account, chain: publicClient.chain })
+
+    const expected = [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n, 10n]
+    const onchainRoot = await SkinnyFatContract.read.root()
+    const caughtUp = await trees.syncTreesEvent([...treeIds])
+    for (const [treeId, tree] of Object.entries(caughtUp)) {
+      assert.deepEqual(tree.tree.leaves, expected, `tree ${treeId} has the wrong leaves after catching up from a rewind`)
+      assert.equal(tree.tree.root, onchainRoot, `tree ${treeId} does not match the onchain root`)
+    }
+  });
+
+  // A treeId that never emitted anything has no NewRoot to take a block number from, so nothing
+  // in `syncState.treeState` describes it. Syncing it should hand back an empty tree, not blow up.
+  it("Should return an empty tree for a treeId that has no events", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n]], { account: deployer.account, chain: publicClient.chain })
+
+    const synced = await trees.syncTreesEvent([0xdeadn])
+    assert.deepEqual(synced[toHex(0xdeadn)].tree.leaves, [], "an unknown treeId reconstructed leaves")
+  });
+
+  // Same missing `treeState` entry, reached the other way: the pinned root is never found, so the scan
+  // walks the whole range and comes back with nothing. That deserves a "root not found" error, not the
+  // TypeError of reading `.lastSynced` off undefined. (If you'd rather return an empty tree here,
+  // swap this for the leaves-are-empty assert above.)
+  it("Should report a root that was never emitted instead of crashing", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const treeIds = await SkinnyFatContract.read.getTreeIds([0n]);
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n]], { account: deployer.account, chain: publicClient.chain })
+    const error = await trees.syncTreesEvent([...treeIds], { syncToRoot: 12345n })
+      .then(() => undefined, (err: Error) => err)
+    assert.ok(error, "syncing to a root that was never emitted resolved instead of reporting it")
+    assert.match(error.message, /root/i, "the error should name the root it could not find")
   });
 });
 

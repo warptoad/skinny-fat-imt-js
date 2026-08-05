@@ -107,7 +107,7 @@ enum TREE_TYPE {
 
 export const LeanIMTHashFuncPoseidon2: LeanIMTHashFunction = (a: bigint, b: bigint) => poseidon2Hash([a, b])
 
-export type CachedTree = { tree: LeanIMT<bigint>, type: TREE_TYPE, lastSynced: bigint }
+export type CachedTree = { tree: LeanIMT<bigint>, type: TREE_TYPE, lastSynced: bigint, insertOnlyTree?: boolean }
 
 export class Trees {
     private trees: { [treeId: Hex]: CachedTree } = {}
@@ -131,20 +131,24 @@ export class Trees {
 
     }
 
-    async syncTreesStorage(treeIds: bigint[] | undefined, { chunkSize = 2000n, insertOnlyTree = undefined } = {}) {
-        treeIds ??= [];
+    async syncTreesStorage(treeIds: bigint[], { chunkSize = 2000n, insertOnlyTrees }: { insertOnlyTrees?: boolean, chunkSize?: bigint } = {}) {
+        // default syncs all previously synced trees
+        treeIds ??= Object.keys(this.trees).map((v) => BigInt(v));
         const treeIdsHex = treeIds.map((id) => toHex(id));
+        // if one treeId is known to be *not* insertOnlyTree or unknown if they are, default insertOnlyTrees=false
+        insertOnlyTrees ??= !treeIdsHex.some(id => this.trees[id] === undefined || this.trees[id].insertOnlyTree == false);
+
         const chainId = await this.publicClient.getChainId();
         if (treeIds.length === 0) {
-            throw new Error(`Please specify which treeIds to sync. SyncTreesStorage cant automatically find them. Use syncTreesEvent or the contract using the skinny/fat-imt library if it can provide the treeId.`)
+            throw new Error(`Nothing to sync. No treeIds in cache and no treeIds provided. Please specify which treeIds to sync. SyncTreesStorage cant automatically find them. Use syncTreesEvent or maybe the contract using the skinny/fat-imt library if it can provide the treeId.`)
         }
         const cachedTrees = treeIdsHex.filter((id) => this.trees[id]?.tree.leaves.length > 0)
-        if (insertOnlyTree === undefined && cachedTrees.length > 0) {
+        if (insertOnlyTrees === undefined && cachedTrees.length > 0) {
             console.warn(`treeIds:${cachedTrees} where found in cache from a previous sync. But insertOnlyTree=undefined so this cache can't be used. If all these treeIds genuinely use update() or updateMany(), you can safely ignore this warning. Or silence it by explicitly setting insertOnlyTree=false`)
         }
     }
 
-    async syncTreesEvent(treeIds: bigint[] | undefined = undefined, { syncToRoot, chunkSize=2000n, insertOnlyTree=false, autoDiscovery }: { syncToRoot?: bigint, chunkSize?: bigint, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
+    async syncTreesEvent(treeIds: bigint[] | undefined = undefined, { syncToRoot, chunkSize = 2000n, insertOnlyTree, autoDiscovery, hasRepeatedLeafs=true }: { syncToRoot?: bigint, chunkSize?: bigint, hasRepeatedLeafs?:boolean, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
         treeIds ??= [];
         if (treeIds.length !== 0 && autoDiscovery === true) {
             throw new Error(`TreeIds where provided while autoDiscovery=true. Either turn off autoDiscovery to only sync those specific ids or set treeIds=undefined to automatically discover and sync all treeId.`)
@@ -153,7 +157,7 @@ export class Trees {
             throw new Error(`Please specify which treeIds to sync. Or set autoDiscovery=true`)
         }
         const chainId = await this.publicClient.getChainId()
-        const defaultToAutoDiscover = treeIds.length === 0 && autoDiscovery === undefined && syncToRoot === undefined 
+        const defaultToAutoDiscover = treeIds.length === 0 && autoDiscovery === undefined && syncToRoot === undefined
         const discoverAllIds = treeIds.length === 0 && autoDiscovery === undefined && syncToRoot === undefined || autoDiscovery === true
         if (autoDiscovery && syncToRoot !== undefined) {
             console.warn(`autoDiscovery was set to true, but a root was provided to syncToRoot. This causes the function to run all the way till block: ${getDeploymentBlock(chainId)}, to discover all treeIds. Even if a tree is already found with that root and synced, it will keep going to find another tree with that root. If you intent on only syncing one tree (or known list of ids), please provide them and set autoDiscovery=false.`)
@@ -163,32 +167,33 @@ export class Trees {
         }
 
         // sync backwards, sync every NewLeaf, UpdatedLeaf, RepeatedLeafs, event
-        const lastBlock = (await this.publicClient.getBlock({ blockTag: 'safe' })).number
+        const newestBlock = (await this.publicClient.getBlock({ blockTag: 'safe' })).number
         // in discovery we go all the way down, if treeIds are provided, we go down till all them are synced
         // if all of them are synced before, we don't sync all leaves, just those who happened after the most out of date tree was synced at
-        const firstBlock = discoverAllIds ? BigInt(getDeploymentBlock(chainId)) : this.getOldestSyncBlock(treeIds)
+        // when looking for a specific root we need to also go down to the lowest block since the root might be older then the last sync
+        const oldestBlock = discoverAllIds || syncToRoot ? BigInt(getDeploymentBlock(chainId)) : this.getOldestSyncBlock(treeIds)
 
-        // SIZE MISMATCH, LASTSYNC_BLOCK 
+        const syncState: SyncState = { treeState: {}, lastBlockSynced: newestBlock, unsyncedIds: new Set(treeIds.map((id) => toHex(id))) }
 
-        const syncState: SyncState = { treeState: {}, lastBlockSynced: lastBlock, unsyncedIds: new Set(treeIds.map((id) => toHex(id))) }
-
-        const insertOnlyEvents = ["NewRoot", "NewLeaf", "RepeatedLeafs"] as const
+        const insertEvents = hasRepeatedLeafs ? ["NewLeaf", "RepeatedLeafs"] as const : ["NewLeaf"] as const;
+        const leafEvents = insertOnlyTree ? insertEvents : ["UpdatedLeaf", ...insertEvents] as const
         do {
+            const foundAllRoots = syncState.unsyncedIds.size === 0 && syncToRoot === undefined && discoverAllIds == false
             await queryMultiEventsInChunks({
                 publicClient: this.publicClient,
                 contract: await this.getContract(),
-                eventNames: insertOnlyTree ? insertOnlyEvents : ["UpdatedLeaf", ...insertOnlyEvents],
+                eventNames: foundAllRoots ? leafEvents : ["NewRoot", ...leafEvents],
                 // only our treeIds. treeId is the 1st indexed param of NewRoot, an array means "any of these"
                 sharedEventFilterArgs: discoverAllIds ? undefined : { treeId: [...syncState.unsyncedIds].map((id) => BigInt(id)) },
-                firstBlock: firstBlock,
+                firstBlock: oldestBlock,
                 lastBlock: syncState.lastBlockSynced,
                 reverseOrder: true,
                 maxEvents: Infinity,
                 chunkSize: chunkSize,
                 // if we need all treeIds?
-                postQueryFilter: getEventFilter(firstBlock, syncState, { autoDiscover: discoverAllIds, syncToRoot: syncToRoot })
+                postQueryFilter: getEventFilter(oldestBlock, syncState, { autoDiscover: discoverAllIds, syncToRoot: syncToRoot })
             })
-        } while (syncState.unsyncedIds.size > 0 && syncState.lastBlockSynced > firstBlock)
+        } while (syncState.unsyncedIds.size > 0 && syncState.lastBlockSynced > oldestBlock)
 
         // cache the tree, or update the new/updated leafs of an existing cache tree.
         const syncedTrees: { [treeId: Hex]: CachedTree } = {}
@@ -213,15 +218,32 @@ export class Trees {
                     cacheTree.tree.insertMany(newLeafs)
                 }
 
-                cacheTree.lastSynced = lastBlock
+                cacheTree.lastSynced = newSyncState.lastSynced
             } else {
                 this.trees[treeId] = {
                     tree: new LeanIMT(this.hashFunc, newSyncState ? newSyncState.leaves : []),
                     type: this.trees[treeId] ? this.trees[treeId].type : await identifyTree(BigInt(treeId), this.contract),
-                    lastSynced: lastBlock
+                    lastSynced: newSyncState?.lastSynced ? newSyncState.lastSynced : 0n,
+                    insertOnlyTree: insertOnlyTree
                 }
             }
             syncedTrees[treeId] = this.trees[treeId];
+        }
+
+        if (syncToRoot !== undefined) {
+            const treeIdsWithNoRoot = Object.keys(syncedTrees).filter((id) => syncedTrees[id as Hex].tree.root !== syncToRoot) as Hex[]
+            const allTreeIds = Object.keys(syncedTrees)
+            if (treeIdsWithNoRoot.length > 0) {
+                if (allTreeIds.length === treeIdsWithNoRoot.length) {
+                    throw new Error(`Root: ${syncToRoot} was never found for all treeIds: ${Object.keys(syncedTrees)}`)
+                } else {
+                    const foundTreeIds = allTreeIds.filter((id) => treeIdsWithNoRoot.includes(id as Hex));
+                    console.warn(
+                        `Root: ${syncToRoot} was never found for some treeIds: ${Object.keys(syncedTrees)}. But was found for ${allTreeIds.filter((id) => treeIdsWithNoRoot.includes(id as Hex))})`
+                    )
+                    treeIdsWithNoRoot.forEach((id)=>delete syncedTrees[id])
+                }
+            }
         }
         return syncedTrees;
     }
@@ -322,7 +344,7 @@ export async function identifyTree(
     return TREE_TYPE.UNKNOWN
 }
 
-type SyncState = { lastBlockSynced: bigint, unsyncedIds: Set<Hex>, treeState: { [treeId: Hex]: { leaves: bigint[], count: bigint, targetSize: bigint } } }
+type SyncState = { lastBlockSynced: bigint, unsyncedIds: Set<Hex>, treeState: { [treeId: Hex]: { leaves: bigint[], count: bigint, targetSize: bigint, lastSynced: bigint } } }
 type IMTEventFilter = PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">>
 export function getEventFilter(
     firstBlock: bigint, syncState: SyncState,
@@ -340,6 +362,7 @@ export function getEventFilter(
                             leaves: [],
                             count: 0n,
                             targetSize: event.args.size,
+                            lastSynced: event.blockNumber - 1n // 2 roots can be in one block, so -1 to be safe
                         }
                     }
                 }
@@ -347,7 +370,7 @@ export function getEventFilter(
                 // so syncState[treeId] contains something now
             } else {
                 const tree = syncState.treeState[treeId]
-                if (tree.count >= tree.targetSize) {
+                if (tree.count === tree.targetSize) {
                     syncState.unsyncedIds.delete(treeId);
                     quit = true;
                     continue
