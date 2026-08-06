@@ -94,11 +94,14 @@ contract SkinnyFat is
     // if you'r only using the storage variant, no need to override this SkinnyIMTReadableStorage just passes treeStorage.treeData along
     // if you use both tho do override like this!!
     // if you got more trees. You can store them in a mapping like this
+    // TODO this is kinda confusing, the storageReadable inherited contract, re-uses _getSkinnyEventTree by doing .treeData, same needs to happen here
     function _getSkinnyEventTree(
         uint256 treeId
     ) internal view virtual override returns (SkinnyIMTDataEvent storage) {
         uint256 index = indexOfTreeId[treeId];
-        if (treeTypes[treeId] != TreeType.SKINNY_EVENT) {
+        if (treeTypes[treeId] == TreeType.SKINNY_STORAGE) {
+            return skinnyStorageTrees[index].treeData;
+        } else if (treeTypes[treeId] != TreeType.SKINNY_EVENT) {
             revert TreeHasIncorrectType();
         }
         return skinnyEventTrees[index];
@@ -120,7 +123,9 @@ contract SkinnyFat is
         uint256 treeId
     ) internal view virtual override returns (FatIMTDataEvent storage) {
         uint256 index = indexOfTreeId[treeId];
-        if (treeTypes[treeId] != TreeType.FAT_EVENT) {
+        if (treeTypes[treeId] == TreeType.FAT_STORAGE) {
+            return fatStorageTrees[index].treeData;
+        } else if (treeTypes[treeId] != TreeType.FAT_EVENT) {
             revert TreeHasIncorrectType();
         }
         return fatEventTrees[index];

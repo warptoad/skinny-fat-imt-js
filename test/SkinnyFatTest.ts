@@ -341,6 +341,118 @@ describe("SkinnyFat", async function () {
     assert.deepEqual(synced[toHex(0xdeadn)].tree.leaves, [], "an unknown treeId reconstructed leaves")
   });
 
+  // The storage path: no events at all, the leaves are read back out of the contract at the safe
+  // block. Covers a leaf that was *changed* rather than appended (so a sync that only ever appends
+  // gets it wrong), a chunkSize that forces several eth_calls, the incremental insert-only re-sync
+  // off the cache, and the skinny event tree, which keeps no leaves and so can't be read this way.
+  const storageSeed = toHex(crypto.getRandomValues(new Uint8Array(32)))
+  it(`Should sync trees straight from storage with random seed: ${storageSeed}`, { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    // only the storage trees: skinnyEvent keeps side nodes and no leaves at all, and fatEvent's leaves
+    // sit in its nodes, which this contract can't serve — FatIMTReadableStorage claims the one
+    // `getFatLeaves` selector for the storage tree, so a contract holding both would have to dispatch.
+    const [fatStorage, fatEvent, skinnyStorage, skinnyEvent] = await SkinnyFatContract.read.getTreeIds([0n]);
+    const storageTreeIds = [fatStorage, skinnyStorage]
+
+    let jsTree = new LeanIMT((a, b) => poseidon2Hash([a, b]))
+    const leaves = [1n, 2n, 3n, 4n, 5n]
+    jsTree.insertMany(leaves)
+    await SkinnyFatContract.write.insertMany([leaves], { account: deployer.account, chain: publicClient.chain })
+    // an update, so the tree that comes back can't be explained by appends alone
+    jsTree = await randomUpdate(SkinnyFatContract, jsTree, storageSeed, deployer, publicClient)
+
+    // chunkSize 2 over 5 leaves, so the read spans several eth_calls including a partial last one
+    const synced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n })
+    assert.deepEqual(
+      Object.keys(synced).sort(),
+      storageTreeIds.map((id) => toHex(id)).sort(),
+      "storage sync reproduced a different set of trees than it was asked for"
+    )
+    const onchainRoot = await SkinnyFatContract.read.root()
+    for (const [treeId, tree] of Object.entries(synced)) {
+      assert.deepEqual(tree.tree.leaves, jsTree.leaves, `tree ${treeId} has the wrong leaves after a storage sync`)
+      assert.equal(rootOf(tree.tree), onchainRoot, `tree ${treeId} does not match the onchain root after a storage sync`)
+    }
+
+    // remember this state, the last assertion syncs back to it
+    const pinnedBlock = await publicClient.getBlockNumber()
+    const pinnedLeaves = jsTree.leaves
+
+    // only inserts from here, so the second sync may keep the cached leaves and read just the new ones
+    const appended = [6n, 7n, 8n]
+    jsTree.insertMany(appended)
+    await SkinnyFatContract.write.insertMany([appended], { account: deployer.account, chain: publicClient.chain })
+
+    const resynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const appendedRoot = await SkinnyFatContract.read.root()
+    assert.notEqual(appendedRoot, onchainRoot, "the appended leaves did not change the root")
+    for (const [treeId, tree] of Object.entries(resynced)) {
+      assert.deepEqual(tree.tree.leaves, jsTree.leaves, `tree ${treeId} has the wrong leaves after an incremental storage sync`)
+      assert.equal(rootOf(tree.tree), appendedRoot, `tree ${treeId} does not match the onchain root after an incremental storage sync`)
+    }
+
+    // insertOnlyTrees is a promise the caller can get wrong: an update() rewrites a leaf below the
+    // cached size, which no amount of appending can pick up. The root check has to catch that and
+    // re-read the tree in full instead of caching a wrong one.
+    jsTree = await randomUpdate(SkinnyFatContract, jsTree, sha256(concat([storageSeed, toHex("brokenPromise")])), deployer, publicClient)
+    const repaired = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const updatedRoot = await SkinnyFatContract.read.root()
+    assert.notEqual(updatedRoot, appendedRoot, "the update did not change the root")
+    for (const [treeId, tree] of Object.entries(repaired)) {
+      assert.deepEqual(tree.tree.leaves, jsTree.leaves, `tree ${treeId} kept the stale cached leaves of a wrongly promised insert-only tree`)
+      assert.equal(rootOf(tree.tree), updatedRoot, `tree ${treeId} does not match the onchain root after repairing a stale cache`)
+    }
+
+    // reading past the end has to be reported. The fat event tree is the one that used to answer it:
+    // its leaves live in a mapping, so every index past the end reads back as a leaf of 0.
+    const chainId = await publicClient.getChainId()
+    const blockNumber = await publicClient.getBlockNumber()
+    const outOfRange = await trees.getLeavesStorage(toHex(fatEvent), chainId, 0n, BigInt(jsTree.size) + 1n, blockNumber)
+      .then(() => undefined, (err: Error) => err)
+    assert.ok(outOfRange, "reading a leaf range past the end of the tree resolved instead of reporting it")
+    assert.match(outOfRange.message, /out of range/i, "the error should say the range is out of range")
+
+    // a reset leaves the tree *smaller* than the cache, so the cached tree is trimmed back to the
+    // onchain size and checked, rather than re-read. Re-inserting leaves the cache already holds as
+    // its prefix is the case that survives that check.
+    const keptPrefix = jsTree.leaves.slice(0, 3)
+    await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
+    await SkinnyFatContract.write.insertMany([keptPrefix], { account: deployer.account, chain: publicClient.chain })
+    const trimmed = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const trimmedRoot = await SkinnyFatContract.read.root()
+    for (const [treeId, tree] of Object.entries(trimmed)) {
+      assert.deepEqual(tree.tree.leaves, keptPrefix, `tree ${treeId} was not trimmed back to the reset tree`)
+      assert.equal(rootOf(tree.tree), trimmedRoot, `tree ${treeId} does not match the onchain root after a trim`)
+    }
+
+    // and the reset the sizes can't reveal: the tree grew back *past* the cached size, so it looks
+    // like ordinary growth while every cached leaf is a different one. Only the root check sees it.
+    const regrown = [11n, 12n, 13n, 14n, 15n]
+    assert.ok(regrown.length > keptPrefix.length, "the regrown tree has to outgrow the cache to be this case")
+    await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
+    await SkinnyFatContract.write.insertMany([regrown], { account: deployer.account, chain: publicClient.chain })
+    const regrownSynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const regrownRoot = await SkinnyFatContract.read.root()
+    for (const [treeId, tree] of Object.entries(regrownSynced)) {
+      assert.deepEqual(tree.tree.leaves, regrown, `tree ${treeId} kept cached leaves from before a reset it grew past`)
+      assert.equal(rootOf(tree.tree), regrownRoot, `tree ${treeId} does not match the onchain root after a reset it grew past`)
+    }
+
+    // pinned to an older block, every read has to land on that block's state: the leaves from before
+    // both resets, not the ones at head that the cache is currently holding.
+    const historic = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, blockNumber: pinnedBlock })
+    for (const [treeId, tree] of Object.entries(historic)) {
+      assert.deepEqual(tree.tree.leaves, pinnedLeaves, `tree ${treeId} did not sync to the state at block ${pinnedBlock}`)
+      assert.equal(tree.lastSynced, pinnedBlock, `tree ${treeId} was not stamped with the block it was synced to`)
+    }
+
+    // and a tree whose leaves simply aren't in storage has to be reported, not synced to an empty tree
+    const error = await new Trees(SkinnyFatContract.address, publicClient).syncTreesStorage([skinnyEvent])
+      .then(() => undefined, (err: Error) => err)
+    assert.ok(error, "storage syncing a skinny event tree resolved instead of reporting it")
+    assert.match(error.message, /SKINNY_EVENT/, "the error should name the unsupported tree type")
+  });
+
   // Same missing `treeState` entry, reached the other way: the pinned root is never found, so the scan
   // walks the whole range and comes back with nothing. That deserves a "root not found" error, not the
   // TypeError of reading `.lastSynced` off undefined. (If you'd rather return an empty tree here,
