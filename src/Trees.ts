@@ -133,9 +133,18 @@ export class Trees {
 
     }
 
+    /**
+     * Reads trees straight from contract storage, at `blockNumber` (defaults to the safe block).
+     *
+     * `attemptFastSizeMatch` (default true) bets that the cached tree is still the right *prefix* of the
+     * onchain one, so only the difference in size has to be dealt with: read the leaves past the
+     * cache's end, or drop the ones past the onchain size. It is a hope, not a promise, so it always
+     * ends in a root check — a tree that had an update(), or was reset and regrown with different
+     * leaves, fails that check and is re-read in full. Turning it off re-reads every leaf up front.
+     */
     async syncTreesStorage(
         treeIds: bigint[] | undefined = undefined,
-        { chunkSize = 2000n, insertOnlyTrees, blockNumber }: { insertOnlyTrees?: boolean, chunkSize?: bigint, blockNumber?: bigint } = {}
+        { chunkSize = 2000n, attemptFastSizeMatch = true, blockNumber }: { attemptFastSizeMatch?: boolean, chunkSize?: bigint, blockNumber?: bigint } = {}
     ): Promise<{ [treeId: Hex]: CachedTree }> {
         // default syncs all previously synced trees
         treeIds ??= (Object.keys(this.trees) as Hex[]).map((v) => BigInt(v));
@@ -146,13 +155,11 @@ export class Trees {
             throw new Error(`chunkSize has to be at least 1, got: ${chunkSize}`)
         }
         const treeIdsHex = treeIds.map((id) => toHex(id));
-        // if one treeId is known to be *not* insertOnlyTree or unknown if they are, default insertOnlyTrees=false
-        insertOnlyTrees ??= treeIdsHex.every((id) => this.trees[id]?.insertOnlyTree === true);
 
         const chainId = await this.publicClient.getChainId();
         const cachedTrees = treeIdsHex.filter((id) => this.trees[id] !== undefined && this.trees[id].tree.size > 0)
-        if (insertOnlyTrees === false && cachedTrees.length > 0) {
-            console.warn(`treeIds:${cachedTrees} where found in cache from a previous sync. But insertOnlyTrees=false so this cache is not tried and every leaf is read again. If all these treeIds genuinely never use update(), updateMany() or reset(), set insertOnlyTrees=true to only read the leaves added since the last sync.`)
+        if (attemptFastSizeMatch === false && cachedTrees.length > 0) {
+            console.warn(`treeIds:${cachedTrees} where found in cache from a previous sync. But attemptFastSizeMatch=false so this cache is not tried and every leaf is read again. The attempt is checked against the onchain root, so it can't cache a wrong tree, it only costs a re-read when it doesn't hold.`)
         }
         const identifiedTreesEnt = await Promise.all(treeIdsHex.map(async (id) => [id, await this.getTreeType(id, chainId)])) as [Hex, TREE_TYPE][]
         const unsupportedTypes = [TREE_TYPE.NO_INTERFACE, TREE_TYPE.UNKNOWN, TREE_TYPE.SKINNY_EVENT]
@@ -173,27 +180,48 @@ export class Trees {
             const cached = this.trees[treeId]
             const cacheSize = BigInt(cached ? cached.tree.size : 0)
 
-            // an empty LeanIMT has no root, the contract reports 0 for one
             let tree: LeanIMT<bigint> | undefined = undefined
-            if (insertOnlyTrees && cacheSize > 0n) {
-                const attempt = cacheSize > targetSize
-                    // the tree shrank, so a reset() happened. What's left of the cache is the same
-                    // prefix only if nothing was rewritten since, which the root below decides.
+            // leaves the attempt below already read from the contract, covering [readFrom, targetSize).
+            // They came from this block, not from the cache, so a failed attempt doesn't invalidate them
+            // and the fallback read only has to cover [0, readFrom).
+            let freshLeaves: bigint[] = []
+            let readFrom = targetSize
+            if (attemptFastSizeMatch && cacheSize > 0n) {
+                const startTime = performance.now()
+                let attempt: LeanIMT<bigint>
+                if (cacheSize > targetSize) {
+                    // the cache is ahead of the onchain tree: either it was synced to a newer block
+                    // than this one, or a reset() happened. Either way the hope is that the leaves it
+                    // keeps are the same ones, so only the indexes past targetSize have to go.
                     // @TODO trimming rehashes the whole prefix, LeanIMT can't drop leaves and keep
                     // its internal nodes. Same trade-off syncTreesEvent's trim makes.
-                    ? new LeanIMT(this.hashFunc, cached.tree.leaves.slice(0, Number(targetSize)))
-                    // @notice grows the cached tree in place, so `cached.tree` is only still the old
-                    // tree when there was nothing to add. Every path below overwrites it anyway.
-                    : await this.readTreeStorage(treeId, chainId, blockNumber, chunkSize, targetSize, cached.tree)
+                    attempt = new LeanIMT(this.hashFunc, cached.tree.leaves.slice(0, Number(targetSize)))
+                } else {
+                    // the hope is that the tree only grew, so only the indexes the cache is missing
+                    // are read. An update() below cacheSize is invisible here, the root check catches it.
+                    // @notice mutates cached.tree, but every path below overwrites the cache entry anyway
+                    freshLeaves = await this.readLeavesStorage(treeId, chainId, blockNumber, chunkSize, cacheSize, targetSize)
+                    readFrom = cacheSize
+                    if (freshLeaves.length > 0) {
+                        cached.tree.insertMany(freshLeaves)
+                    }
+                    attempt = cached.tree
+                }
+                // an empty LeanIMT has no root, the contract reports 0 for one
                 if ((attempt.root ?? 0n) === onchainRoot) {
                     tree = attempt
                 } else {
-                    console.warn(`The cached tree of treeId:${treeId} did not reproduce the onchain root, so insertOnlyTrees=true did not hold for it (an update(), updateMany() or reset() happened). Falling back to re-reading all of its leaves.`)
+                    // the leaves the cache held were not the onchain ones, so an update(), updateMany()
+                    // or a reset() rewrote them. Only the tree build is wasted, the leaves read above
+                    // are kept, so the fallback re-reads the cached ones and nothing more.
+                    console.warn(`failed fast size match on treeId:${treeId}, wasted ${performance.now() - startTime}ms on a tree build. Falling back to reading the ${readFrom} leaves the cache claimed, reusing the ${freshLeaves.length} already read from the contract.`)
                 }
             }
 
+            // attempt failed or was not tried, so read every leaf the attempt didn't already get
             if (tree === undefined) {
-                tree = await this.readTreeStorage(treeId, chainId, blockNumber, chunkSize, targetSize)
+                const readLeaves = await this.readLeavesStorage(treeId, chainId, blockNumber, chunkSize, 0n, readFrom)
+                tree = new LeanIMT(this.hashFunc, [...readLeaves, ...freshLeaves])
                 if ((tree.root ?? 0n) !== onchainRoot) {
                     // every leaf came straight from the contract at this block, so this is not a stale
                     // cache. Drop what's cached for this tree, the attempt above may have grown it.
@@ -206,28 +234,30 @@ export class Trees {
                 tree: tree,
                 type: this.trees[treeId].type, // getTreeType() above put every treeId in the cache
                 lastSynced: blockNumber,
-                insertOnlyTree: insertOnlyTrees
+                // attemptFastSizeMatch is a guess this sync made, not something it learned about the tree,
+                // so whatever is known about updates stays as it was
+                insertOnlyTree: this.trees[treeId].insertOnlyTree
             }
             syncedTrees[treeId] = this.trees[treeId]
         }
         return syncedTrees
     }
-    
-    private async readTreeStorage(
-        treeId: Hex, chainId: number, blockNumber: bigint, chunkSize: bigint, targetSize: bigint, base?: LeanIMT<bigint>
-    ): Promise<LeanIMT<bigint>> {
-        const newLeaves: bigint[] = []
-        for (let firstIndex = BigInt(base ? base.size : 0); firstIndex < targetSize; firstIndex += chunkSize) {
-            const endIndex = minBigInt(firstIndex + chunkSize, targetSize) // endIndex is exclusive
-            newLeaves.push(...await this.getLeavesStorage(treeId, chainId, firstIndex, endIndex, blockNumber))
+
+    /**
+     * The leaves of `[startIndex, endIndex)`, read in chunks of `chunkSize`. Same range as
+     * {@link Trees#getLeavesStorage}, which does it in a single call, but split up so a big range
+     * doesn't have to fit in one eth_call. What the caller does with them (build a tree, grow one)
+     * is up to it.
+     */
+    private async readLeavesStorage(
+        treeId: Hex, chainId: number, blockNumber: bigint, chunkSize: bigint, startIndex: bigint, endIndex: bigint
+    ): Promise<bigint[]> {
+        const leaves: bigint[] = []
+        for (let firstIndex = startIndex; firstIndex < endIndex; firstIndex += chunkSize) {
+            const lastIndex = minBigInt(firstIndex + chunkSize, endIndex) // lastIndex is exclusive
+            leaves.push(...await this.getLeavesStorage(treeId, chainId, firstIndex, lastIndex, blockNumber))
         }
-        if (base === undefined) {
-            return new LeanIMT(this.hashFunc, newLeaves)
-        }
-        if (newLeaves.length > 0) {
-            base.insertMany(newLeaves)
-        }
-        return base
+        return leaves
     }
 
     async syncTreesEvent(treeIds: bigint[] | undefined = undefined, { attemptTreeRebuildOnTrim = true, syncToRoot, chunkSize = 2000n, insertOnlyTree, autoDiscovery, hasRepeatedLeafs = true }: { attemptTreeRebuildOnTrim?: boolean, syncToRoot?: bigint, chunkSize?: bigint, hasRepeatedLeafs?: boolean, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
@@ -527,7 +557,9 @@ export function getEventFilter(
                         const simpleTrim = attemptTreeRebuildOnTrim && syncState.treeCache[treeId]?.tree.size > event.args.size
                         if (simpleTrim) {
                             const trimmed = syncState.treeCache[treeId]?.tree.leaves.slice(0, Number(event.args.size))
+                            const startTime = performance.now();
                             const trimmedTree = new LeanIMT(hashFunc, trimmed);
+                            const endTime = performance.now();
                             if (event.args.root === trimmedTree.root) {
                                 console.log(`success full trim on treeId: ${treeId}`)
                                 syncState.treeState[treeId] = {
@@ -540,10 +572,11 @@ export function getEventFilter(
                                 syncState.unsyncedIds.delete(treeId);
                                 quit = true;
                                 continue
+                            } else {
+                                console.warn(`failed trim, wasted ${endTime-startTime}ms on tree build`)
+                                // console.warn(`Rolling back to root: ${toHex(event.args.root)} failed. Likely because a tree reset or update happened. If that is true, you can safely ignore this warning. TODO optimize this`)
+                                //TODO: the entire tree was rebuilt here, just to fail. For a future re-write of a more scalable LeanIMTjs, make it so it can trim leaves, while re-using the internal nodes so rehashing is not needed for all.`)
                             }
-                        } else {
-                            // console.warn(`Rolling back to root: ${toHex(event.args.root)} failed. Likely because a tree reset or update happened. If that is true, you can safely ignore this warning. TODO optimize this`)
-                            //TODO: the entire tree was rebuilt here, just to fail. For a future re-write of a more scalable LeanIMTjs, make it so it can trim leaves, while re-using the internal nodes so rehashing is not needed for all.`)
                         }
                         syncState.treeState[treeId] = {
                             leaves: [],

@@ -383,7 +383,7 @@ describe("SkinnyFat", async function () {
     jsTree.insertMany(appended)
     await SkinnyFatContract.write.insertMany([appended], { account: deployer.account, chain: publicClient.chain })
 
-    const resynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const resynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, attemptFastSizeMatch: true })
     const appendedRoot = await SkinnyFatContract.read.root()
     assert.notEqual(appendedRoot, onchainRoot, "the appended leaves did not change the root")
     for (const [treeId, tree] of Object.entries(resynced)) {
@@ -391,11 +391,11 @@ describe("SkinnyFat", async function () {
       assert.equal(rootOf(tree.tree), appendedRoot, `tree ${treeId} does not match the onchain root after an incremental storage sync`)
     }
 
-    // insertOnlyTrees is a promise the caller can get wrong: an update() rewrites a leaf below the
+    // attemptFastSizeMatch is a hope that can turn out wrong: an update() rewrites a leaf below the
     // cached size, which no amount of appending can pick up. The root check has to catch that and
     // re-read the tree in full instead of caching a wrong one.
     jsTree = await randomUpdate(SkinnyFatContract, jsTree, sha256(concat([storageSeed, toHex("brokenPromise")])), deployer, publicClient)
-    const repaired = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const repaired = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, attemptFastSizeMatch: true })
     const updatedRoot = await SkinnyFatContract.read.root()
     assert.notEqual(updatedRoot, appendedRoot, "the update did not change the root")
     for (const [treeId, tree] of Object.entries(repaired)) {
@@ -418,7 +418,7 @@ describe("SkinnyFat", async function () {
     const keptPrefix = jsTree.leaves.slice(0, 3)
     await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
     await SkinnyFatContract.write.insertMany([keptPrefix], { account: deployer.account, chain: publicClient.chain })
-    const trimmed = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const trimmed = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, attemptFastSizeMatch: true })
     const trimmedRoot = await SkinnyFatContract.read.root()
     for (const [treeId, tree] of Object.entries(trimmed)) {
       assert.deepEqual(tree.tree.leaves, keptPrefix, `tree ${treeId} was not trimmed back to the reset tree`)
@@ -431,7 +431,7 @@ describe("SkinnyFat", async function () {
     assert.ok(regrown.length > keptPrefix.length, "the regrown tree has to outgrow the cache to be this case")
     await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
     await SkinnyFatContract.write.insertMany([regrown], { account: deployer.account, chain: publicClient.chain })
-    const regrownSynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, insertOnlyTrees: true })
+    const regrownSynced = await trees.syncTreesStorage([...storageTreeIds], { chunkSize: 2n, attemptFastSizeMatch: true })
     const regrownRoot = await SkinnyFatContract.read.root()
     for (const [treeId, tree] of Object.entries(regrownSynced)) {
       assert.deepEqual(tree.tree.leaves, regrown, `tree ${treeId} kept cached leaves from before a reset it grew past`)
