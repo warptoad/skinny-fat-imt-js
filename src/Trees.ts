@@ -342,6 +342,29 @@ export class Trees {
                 continue
             }
 
+            const canMerge = newSyncState !== undefined && cacheTree !== undefined && isNotOld
+                && BigInt(cacheTree.tree.size) <= newSyncState.targetSize
+
+
+            if (newSyncState !== undefined && newSyncState.tree === undefined) {
+                const targetSize = Number(newSyncState.targetSize)
+                const missing: number[] = []
+                for (let index = canMerge ? cacheTree.tree.size : 0; index < targetSize; index++) {
+                    if (newSyncState.leaves[index] === undefined) {
+                        missing.push(index)
+                        break
+                    }
+                }
+                if (missing.length > 0) {
+                    throw new Error(
+                        `Incomplete sync of treeId:${treeId}. Root ${toHex(newSyncState.expectedRoot)} has ${targetSize} leaves, ` +
+                        `but no event was found indexes ${missing}. Possible causes: hasRepeatedLeafs:false, ` +
+                        `insertOnlyTree:true, a scan that did not reach far enough back (it started at block ${oldestBlock}), ` +
+                        `or a contract that does not emit an event for every leaf it stores.`
+                    )
+                }
+            }
+
             let synced: CachedTree
             if (newSyncState?.tree !== undefined) {
                 // attemptFastSizeMatch was success full by trimming of leaves of the pre-existing cache tree.
@@ -354,9 +377,9 @@ export class Trees {
                     lastSynced: newSyncState.lastSynced,
                     insertOnlyTree: cacheTree!.insertOnlyTree
                 }
-            } else if (newSyncState !== undefined && cacheTree !== undefined && BigInt(cacheTree.tree.size) <= newSyncState.targetSize) {
-                // grow/patch the cached tree with what this scan found. @notice mutates the cached tree
-                // in place, which is only sound because isNotOld says the cache is the older state
+            } else if (canMerge) {
+                // @notice mutates the cached tree in place, so `synced` *is* the cache entry and the
+                // isNotOld check below can no longer keep it out. See canMerge above.
                 const updatedIndexes: number[] = [];
                 const updatedLeaves: bigint[] = [];
                 const newLeafs: bigint[] = [];

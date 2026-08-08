@@ -223,6 +223,35 @@ describe("SkinnyFat", async function () {
     }
   });
 
+  // A leaf whose event was never queried leaves a hole in the sparse `leaves` array, which LeanIMT
+  // would go on to hash (or, on the merge path, insert the leaves above it at the wrong index). The
+  // sync has to notice the gap and name the options that produce it.
+  //
+  // hasRepeatedLeafs:false is a caller mistake here on purpose: the skinny event tree emits *only*
+  // RepeatedLeafs for insertManyRepeated, no per-leaf NewLeaf, so it is the one tree where dropping
+  // that event hides leaves outright. Scanning backwards then runs out of in-epoch leaves, walks
+  // into the epoch before the reset, and fills index 3 and 4 with leaves the target root never had
+  // until `count` reaches targetSize and quits — leaving 0 and 1, the ones it actually needed, unset.
+  it("Should report which leaves a sync never found instead of hashing the gap", { timeout: 30_000 }, async function () {
+    const trees = new Trees(SkinnyFatContract.address, publicClient)
+    const [, , , skinnyEvent] = await SkinnyFatContract.read.getTreeIds([0n]);
+
+    // epoch 1: 5 distinct leaves, so the pre-reset NewLeaf events reach index 4
+    await SkinnyFatContract.write.insertMany([[1n, 2n, 3n, 4n, 5n]], { account: deployer.account, chain: publicClient.chain })
+    await SkinnyFatContract.write.reset({ account: deployer.account, chain: publicClient.chain })
+    // epoch 2: 2 leaves, which on the skinny event tree exist *only* as a RepeatedLeafs event
+    await SkinnyFatContract.write.insertManyRepeated([9n, 2n], { account: deployer.account, chain: publicClient.chain })
+    //await trees.syncTreesEvent([skinnyEvent], { hasRepeatedLeafs: false })
+    const error = await trees.syncTreesEvent([skinnyEvent], { hasRepeatedLeafs: false })
+      .then(() => undefined, (err: Error) => err)
+
+    assert.ok(error, "a sync that never saw the leaves of the target root resolved instead of reporting it")
+    // the raw BigInt/undefined TypeError out of the hash function is the gap going unnoticed
+    assert.doesNotMatch(error.message, /cannot mix bigint/i, `the gap was hashed instead of reported: ${error.message}`)
+    assert.match(error.message, /incomplete sync/i, `the sync should say it is incomplete: ${error.message}`)
+    assert.match(error.message, /index 0/, `the sync should name a leaf it never saw: ${error.message}`)
+  });
+
   // the incremental path: the second sync only sees the *new* leaves, so `count` never reaches
   // `targetSize` and no tree is ever removed from unsyncedTreesIds. Must still terminate, and merge.
   it("Should resync incrementally when leaves are appended after a sync", { timeout: 30_000 }, async function () {
