@@ -125,12 +125,31 @@ export class Trees {
         this.hashFunc = hashFunc;
     }
 
-    /**
-     *
-     * @param treeIds what treeIds to sync, leave empty to auto discover and sync all (archive node only)
-     */
-    async sync(treeIds: Hex[] = []) {
-
+    async sync(treeIds: bigint[] | undefined = undefined, { fullNodeMode = true, attemptFastSizeMatch = true, syncToRoot, eventChunkSize = 2000n, storageChunkSize = 2000n, insertOnlyTree, autoDiscovery, hasRepeatedLeafs = true, blockNumber }: { fullNodeMode?: boolean, blockNumber?: bigint, attemptFastSizeMatch?: boolean, syncToRoot?: bigint, eventChunkSize?: bigint, storageChunkSize?: bigint, hasRepeatedLeafs?: boolean, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
+        let syncedTrees: { [treeId: `0x${string}`]: CachedTree; };
+        if ((autoDiscovery || (treeIds?.length === undefined)) && fullNodeMode) { throw new Error(`auto treeId discovery not supported in fullNodeMode, please provide treeIds to sync. Or turn off fullNodeMode: \`Trees.sync([],{fullNodeMode:false)\``) }
+        if (fullNodeMode) {
+            syncedTrees = await this.syncTreesStorage(
+                treeIds,
+                { chunkSize: storageChunkSize, attemptFastSizeMatch, blockNumber }
+            )
+            // syncing to a specific root is not possible with pure storage, so we sync with storage first
+            // then syncTreesEvent will look for the root and try to trim off the leaves that happened after the root we want
+            // in tree with only inserts this will work and will allows us to get any tree that is up to 1 year old
+            // if there are updates or resets, currently syncTreesEvent will have to go down till it found all leaves
+            if (syncToRoot) {
+                syncedTrees = await this.syncTreesEvent(
+                    treeIds,
+                    { attemptFastSizeMatch, syncToRoot, chunkSize: eventChunkSize, insertOnlyTree, autoDiscovery, hasRepeatedLeafs }
+                )
+            }
+        } else {
+            syncedTrees = await this.syncTreesEvent(
+                treeIds,
+                { attemptFastSizeMatch, syncToRoot, chunkSize: eventChunkSize, insertOnlyTree, autoDiscovery, hasRepeatedLeafs }
+            )
+        }
+        return syncedTrees;
     }
 
     /**
@@ -260,7 +279,7 @@ export class Trees {
         return leaves
     }
 
-    async syncTreesEvent(treeIds: bigint[] | undefined = undefined, { attemptTreeRebuildOnTrim = true, syncToRoot, chunkSize = 2000n, insertOnlyTree, autoDiscovery, hasRepeatedLeafs = true }: { attemptTreeRebuildOnTrim?: boolean, syncToRoot?: bigint, chunkSize?: bigint, hasRepeatedLeafs?: boolean, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
+    async syncTreesEvent(treeIds: bigint[] | undefined = undefined, { attemptFastSizeMatch = true, syncToRoot, chunkSize = 2000n, insertOnlyTree, autoDiscovery, hasRepeatedLeafs = true }: { attemptFastSizeMatch?: boolean, syncToRoot?: bigint, chunkSize?: bigint, hasRepeatedLeafs?: boolean, insertOnlyTree?: boolean, autoDiscovery?: boolean | undefined } = {}) {
         treeIds ??= [];
         if (treeIds.length !== 0 && autoDiscovery === true) {
             throw new Error(`TreeIds where provided while autoDiscovery=true. Either turn off autoDiscovery to only sync those specific ids or set treeIds=undefined to automatically discover and sync all treeId.`)
@@ -303,7 +322,7 @@ export class Trees {
                 maxEvents: Infinity,
                 chunkSize: chunkSize,
                 // if we need all treeIds?
-                postQueryFilter: getEventFilter(oldestBlock, syncState, { hashFunc: this.hashFunc, attemptTreeRebuildOnTrim: attemptTreeRebuildOnTrim, autoDiscover: discoverAllIds, syncToRoot: syncToRoot })
+                postQueryFilter: getEventFilter(oldestBlock, syncState, { hashFunc: this.hashFunc, attemptFastSizeMatch: attemptFastSizeMatch, autoDiscover: discoverAllIds, syncToRoot: syncToRoot })
             })
         } while (syncState.unsyncedIds.size > 0 && syncState.lastBlockSynced > oldestBlock)
 
@@ -313,38 +332,70 @@ export class Trees {
         for (const treeId of allTreeIds) {
             const newSyncState = syncState.treeState[treeId]
             const cacheTree = this.trees[treeId];
-            if (newSyncState && newSyncState.tree !== undefined) {
-                this.trees[treeId].tree = newSyncState.tree
-                this.trees[treeId].lastSynced = newSyncState.lastSynced
-            } else {
-                if (newSyncState && cacheTree && (BigInt(cacheTree.tree.size) <= newSyncState.targetSize)) {
-                    const updatedIndexes: number[] = [];
-                    const updatedLeaves: bigint[] = [];
-                    const newLeafs: bigint[] = [];
-                    newSyncState.leaves.forEach((leaf, index) => {
-                        if (index < cacheTree.tree.size) {
-                            updatedLeaves.push(leaf)
-                            updatedIndexes.push(index)
-                        } else {
-                            newLeafs.push(leaf)
-                        }
-                    })
-                    cacheTree.tree.updateMany(updatedIndexes, updatedLeaves)
-                    if (newLeafs.length > 0) {
-                        cacheTree.tree.insertMany(newLeafs)
-                    }
 
-                    cacheTree.lastSynced = newSyncState.lastSynced
-                } else {
-                    this.trees[treeId] = {
-                        tree: new LeanIMT(this.hashFunc, newSyncState ? newSyncState.leaves : []),
-                        type: this.trees[treeId] ? this.trees[treeId].type : await identifyTree(BigInt(treeId), this.contract),
-                        lastSynced: newSyncState?.lastSynced ? newSyncState.lastSynced : 0n,
-                        insertOnlyTree: insertOnlyTree
+            const isNotOld = cacheTree === undefined
+                || (newSyncState !== undefined && newSyncState.lastSynced >= cacheTree.lastSynced)
+
+            // no-op, no new state and no rollback (syncToRoot on old root can be used to go back to a older root)
+            if (isNotOld === false && syncToRoot === undefined) {
+                syncedTrees[treeId] = cacheTree
+                continue
+            }
+
+            let synced: CachedTree
+            if (newSyncState?.tree !== undefined) {
+                // attemptFastSizeMatch was success full by trimming of leaves of the pre-existing cache tree.
+                // that caused a tree to already be built and checked so we can just use that rn.
+                // it's also almost always a rollback so we should not store in cache
+                // (almost always rollback, it could be that a reset happened, and just happens to have the same leaves as the previous tree but smaller size)
+                synced = {
+                    tree: newSyncState.tree,
+                    type: cacheTree!.type,
+                    lastSynced: newSyncState.lastSynced,
+                    insertOnlyTree: cacheTree!.insertOnlyTree
+                }
+            } else if (newSyncState !== undefined && cacheTree !== undefined && BigInt(cacheTree.tree.size) <= newSyncState.targetSize) {
+                // grow/patch the cached tree with what this scan found. @notice mutates the cached tree
+                // in place, which is only sound because isNotOld says the cache is the older state
+                const updatedIndexes: number[] = [];
+                const updatedLeaves: bigint[] = [];
+                const newLeafs: bigint[] = [];
+                newSyncState.leaves.forEach((leaf, index) => {
+                    if (index < cacheTree.tree.size) {
+                        updatedLeaves.push(leaf)
+                        updatedIndexes.push(index)
+                    } else {
+                        newLeafs.push(leaf)
                     }
+                })
+                cacheTree.tree.updateMany(updatedIndexes, updatedLeaves)
+                if (newLeafs.length > 0) {
+                    cacheTree.tree.insertMany(newLeafs)
+                }
+
+                cacheTree.lastSynced = newSyncState.lastSynced
+                synced = cacheTree
+            } else {
+                // cached tree does not exist or synced tree is smaller and newSyncState.leaves is complete
+                synced = {
+                    tree: new LeanIMT(this.hashFunc, newSyncState ? newSyncState.leaves : []),
+                    type: cacheTree ? cacheTree.type : await identifyTree(BigInt(treeId), this.contract),
+                    lastSynced: newSyncState?.lastSynced ? newSyncState.lastSynced : 0n,
+                    // what the caller claims about this sync, falling back to whatever was known before
+                    insertOnlyTree: insertOnlyTree ?? cacheTree?.insertOnlyTree
                 }
             }
-            syncedTrees[treeId] = this.trees[treeId];
+
+            if (newSyncState !== undefined && (synced.tree.root ?? 0n) !== newSyncState.expectedRoot) {
+                throw new Error(`syncing failed, expected root:${toHex(newSyncState.expectedRoot)} but got ${toHex(synced.tree.root ?? 0n)}`)
+            }
+
+            // a sync may only ever move the cache forward. A syncToRoot rollback is handed to the
+            // caller, but the cache keeps the newer tree it already had.
+            if (isNotOld) {
+                this.trees[treeId] = synced
+            }
+            syncedTrees[treeId] = synced;
         }
 
         if (syncToRoot !== undefined) {
@@ -535,13 +586,13 @@ export async function identifyTree(
 type SyncState = {
     lastBlockSynced: bigint, unsyncedIds: Set<Hex>,
     treeCache: { [treeId: Hex]: CachedTree },
-    treeState: { [treeId: Hex]: { tree?: LeanIMT<bigint>, leaves: bigint[], count: bigint, targetSize: bigint, lastSynced: bigint } }
+    treeState: { [treeId: Hex]: { expectedRoot: bigint, tree?: LeanIMT<bigint>, leaves: bigint[], count: bigint, targetSize: bigint, lastSynced: bigint } }
 }
 
 type IMTEventFilter = PostQueryEventFilter<ReadableEvent<"NewRoot" | "NewLeaf" | "UpdatedLeaf" | "RepeatedLeafs">>
 export function getEventFilter(
     firstBlock: bigint, syncState: SyncState,
-    { autoDiscover, syncToRoot, attemptTreeRebuildOnTrim, hashFunc = LeanIMTHashFuncPoseidon2 }: { hashFunc?: LeanIMTHashFunction, attemptTreeRebuildOnTrim?: boolean, autoDiscover?: boolean, syncToRoot?: bigint } = {}
+    { autoDiscover, syncToRoot, attemptFastSizeMatch, hashFunc = LeanIMTHashFuncPoseidon2 }: { hashFunc?: LeanIMTHashFunction, attemptFastSizeMatch?: boolean, autoDiscover?: boolean, syncToRoot?: bigint } = {}
 ) {
     const quitEarly: IMTEventFilter = (allEvents, chunkEvents, chunkStart, chunkEnd) => {
         let quit = false;
@@ -554,7 +605,7 @@ export function getEventFilter(
                         //TODO in case that syncToRoot is provided, check the tree in cache, if size >= as root says we need.
                         // trim of excess leaves and check if root is already correct.
                         // this allows us to quit very early on insert only trees or ones with update if we are lucky no update happened
-                        const simpleTrim = attemptTreeRebuildOnTrim && syncState.treeCache[treeId]?.tree.size > event.args.size
+                        const simpleTrim = attemptFastSizeMatch && syncState.treeCache[treeId]?.tree.size > event.args.size
                         if (simpleTrim) {
                             const trimmed = syncState.treeCache[treeId]?.tree.leaves.slice(0, Number(event.args.size))
                             const startTime = performance.now();
@@ -567,13 +618,14 @@ export function getEventFilter(
                                     count: 0n,
                                     targetSize: event.args.size,
                                     lastSynced: event.blockNumber - 1n, // 2 roots can be in one block, so -1 to be safe
-                                    tree: trimmedTree
+                                    tree: trimmedTree,
+                                    expectedRoot: event.args.root
                                 }
                                 syncState.unsyncedIds.delete(treeId);
                                 quit = true;
                                 continue
                             } else {
-                                console.warn(`failed trim, wasted ${endTime-startTime}ms on tree build`)
+                                console.warn(`failed trim, wasted ${endTime - startTime}ms on tree build`)
                                 // console.warn(`Rolling back to root: ${toHex(event.args.root)} failed. Likely because a tree reset or update happened. If that is true, you can safely ignore this warning. TODO optimize this`)
                                 //TODO: the entire tree was rebuilt here, just to fail. For a future re-write of a more scalable LeanIMTjs, make it so it can trim leaves, while re-using the internal nodes so rehashing is not needed for all.`)
                             }
@@ -583,7 +635,8 @@ export function getEventFilter(
                             count: 0n,
                             targetSize: event.args.size,
                             lastSynced: event.blockNumber - 1n, // 2 roots can be in one block, so -1 to be safe
-                            tree: undefined
+                            tree: undefined,
+                            expectedRoot: event.args.root
                         }
                     }
                 }
